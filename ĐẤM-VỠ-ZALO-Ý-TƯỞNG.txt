@@ -1,0 +1,123 @@
+================================================================================
+KẾ HOẠCH HÀNH ĐỘNG & NGUYÊN TẮC KỸ THUẬT: DỰ ÁN LIFEMATE (ZALO AI CHALLENGE)
+================================================================================
+
+1.GIAI ĐOẠN 1 CẦN LÀM GÌ?
+--------------------------------------------------------------------------------
+Mục tiêu duy nhất của Giai đoạn 1 là dựng một Pipeline tối giản chạy thông suốt
+từ đầu đến cuối (End-to-End Baseline) để cả 3 người hiểu luồng dữ liệu trước khi
+đi sâu vào nghiên cứu:
+
+1. Khám phá và chạy thử môi trường:
+   - Cả nhóm chạy thử thư viện zaic_tools trên một vài mẫu của tập train để nắm
+     cách khởi tạo ToolEnv, cách gọi lệnh env.call(), và cách sinh ra mã state_hash.
+
+2. Ghép nối Pipeline thô (Naive Baseline):
+   - Dùng 1 mô hình ASR có sẵn (như Whisper-base/small) để chuyển audio sang text.
+   - Dùng 1 LLM nhỏ có sẵn (như Qwen2.5-1.5B/3B) kèm prompt đơn giản để sinh
+     danh sách tool calls.
+   - Chạy các tool calls này vào ToolEnv, lấy danh sách lệnh đã thực thi và
+     state_hash.
+
+3. Xuất file và nộp thử:
+   - Chạy script trên tập public_test để tạo ra file submission.jsonl đúng format.
+   - Nộp thử 1 lần lên web BTC nhằm kiểm tra hệ sinh thái nộp bài và định dạng file.
+
+4. Dựng bộ tự đánh giá offline (evaluate.py):
+   - Viết script tính điểm theo đúng công thức F1 và kiểm tra state_hash trên
+     tập train để dùng làm thước đo đánh giá cho toàn bộ quá trình thử nghiệm sau này.
+
+
+2. GIAI ĐOẠN 2-3 NGÀY: TÌM Ý TƯỞNG, MỤC TIÊU CỐT LÕI & NGUYÊN TẮC TỪNG VỊ TRÍ
+--------------------------------------------------------------------------------
+Trong 2–3 ngày này, mỗi bạn tập trung đào sâu vào mảng phụ trách của mình để đề
+xuất giải pháp, thuật toán và kiến trúc cụ thể.
+
+--------------------------------------------------------------------------------
+A. NGƯỜI PHỤ TRÁCH ASR (ÂM THANH SANG VĂN BẢN)
+--------------------------------------------------------------------------------
+- Mục tiêu cốt lõi:
+  + Chuyển đổi chính xác các câu lệnh âm thanh tiếng Việt từ 3 miền (Bắc, Trung,
+    Nam) thành văn bản tiếng Việt chuẩn NFC.
+  + Nhận diện chuẩn xác các từ khóa công nghệ, từ mượn tiếng Anh thường gặp
+    (book, AC, living room, set, mail).
+  + Đảm bảo thời gian nhận diện cực nhanh (dưới 1–2 giây/file) và tốn ít bộ nhớ
+    GPU/RAM nhất để nhường tài nguyên cho LLM.
+
+- Điểm cần lưu ý khi tìm ý tưởng:
+  + Nghiên cứu các mô hình mã nguồn mở nhẹ: Whisper-base, Whisper-small, hoặc PhoWhisper.
+  + Tìm hiểu cách fine-tune nhẹ hoặc thêm prompt/hotwords cho ASR để mô hình ưu
+    tiên các từ vựng xuất hiện trong danh mục công cụ (tools_catalog.json).
+  + Xem xét việc chuẩn hóa định dạng số, ngày giờ, tiền tệ từ giọng nói sang chữ
+    số để hỗ trợ LLM bóc tách tham số dễ hơn.
+
+- Nguyên tắc không được vi phạm:
+  + Kích thước mô hình ASR phải nằm trong ngân sách chung: Toàn bộ hệ thống
+    (ASR + LLM + phụ trợ) dưới 6 tỷ tham số (< 6B).
+  + Chỉ dùng các pretrained model được công bố trước ngày 26/10/2026 với license hợp lệ.
+  + Tuyệt đối không gọi API bên ngoài (như Google Speech-to-Text hay OpenAI API)
+    trong quá trình suy luận.
+  + Khóa giải mã tất định: Phải dùng Greedy decoding hoặc cơ chế giải mã cố định,
+    không dùng sampling ngẫu nhiên.
+
+
+--------------------------------------------------------------------------------
+B. NGƯỜI PHỤ TRÁCH LLM & REASONING (AGENT LOGIC & TOOL CALLING)
+--------------------------------------------------------------------------------
+- Mục tiêu cốt lõi:
+  + Thiết kế luồng suy luận (Reasoning/ReAct loop) để biến văn bản yêu cầu và
+    ngữ cảnh thành chuỗi tool calls tuần tự, hợp lệ theo JSON Schema của từng app.
+  + Giải quyết bài toán ID phụ thuộc (x-ref): Tự động gọi tool read lấy ID thực
+    tế từ hệ thống trước khi gọi tool write.
+  + Xử lý chính xác 2 trường hợp đặc biệt:
+    * Gọi sys.ask_missing_info khi câu lệnh thiếu tham số bắt buộc.
+    * Trả về mảng rỗng [] khi yêu cầu nằm ngoài phạm vi các app đã cài (out-of-scope).
+
+- Điểm cần lưu ý khi tìm ý tưởng:
+  + Khảo sát các mô hình LLM chuyên về tool calling có kích thước nhỏ gọn:
+    Dòng Qwen2.5 (bản 1.5B hoặc 3B Instruct) hoặc Llama-3.2 (1B hoặc 3B).
+  + Nghiên cứu cấu trúc Prompt Engineering và In-context Learning: Cách truyền
+    schema động dựa vào installed_apps để không bị dài quá context limit.
+  + Lên phương án fine-tune (LoRA/QLoRA) dựa trên 1.600 mẫu của tập train để LLM
+    học đúng cú pháp gọi tool và cách hành xử khi thiếu thông tin.
+
+- Nguyên tắc không được vi phạm:
+  + Kích thước LLM phải dưới 5 tỷ tham số (< 5B); context length không vượt quá
+    16K (16.384) tokens.
+  + Cấm tuyệt đối hard code: Không viết if/else thủ công bắt từ khóa, không gán
+    cứng ID thiết bị hay ID người dùng. Mọi giá trị tham số phải được trích xuất
+    động từ ngữ cảnh hoặc kết quả tool read.
+  + Không dùng API ngoài để suy luận khi chạy test.
+  + Bắt buộc dùng temperature = 0 (hoặc greedy) để đảm bảo sinh văn bản tất định,
+    kết quả 100% tái lập được.
+
+
+--------------------------------------------------------------------------------
+C. NGƯỜI PHỤ TRÁCH MÔI TRƯỜNG, TỐI ƯU & DOCKER (SYSTEM & EVALUATION)
+--------------------------------------------------------------------------------
+- Mục tiêu cốt lõi:
+  + Xây dựng bộ đo lường offline chuẩn xác (evaluate.py) bám sát công thức F1
+    và kiểm tra state_hash của BTC.
+  + Đảm bảo toàn bộ pipeline chạy ổn định, không lỗi ngoại lệ, xử lý xong mỗi
+    sample trong dưới 30 giây trên cấu hình GPU NVIDIA A30 (24GB VRAM).
+  + Chuẩn bị sẵn khung đóng gói Docker hoàn chỉnh, chạy offline 100%, tự động
+    nhận mount /data và xuất file result/submission.jsonl.
+
+- Điểm cần lưu ý khi tìm ý tưởng:
+  + Nghiên cứu các giải pháp tăng tốc độ suy luận (Inference Engine): vLLM,
+    TensorRT-LLM, hoặc llama.cpp.
+  + Khảo sát kỹ thuật lượng hóa mô hình (Quantization) như INT8, INT4 (AWQ/GPTQ)
+    để giảm dung lượng RAM/VRAM và tăng tốc độ xử lý chuỗi tool calls nhiều vòng.
+  + Thiết kế cơ chế phân tích lỗi (Error Analysis Tool): Thống kê tự động bao
+    nhiêu sample bị 0 điểm do lệch hash, bao nhiêu sample bị lỗi schema arguments
+    để báo cho người làm LLM điều chỉnh.
+
+- Nguyên tắc không được vi phạm:
+  + Cấm đọc trực tiếp state.json: Chỉ được tương tác qua các hàm hợp lệ của ToolEnv
+    (validate, call, get_tool_calls, get_state_hash). Tuyệt đối không dùng get_state,
+    states, Executor, Simulator hay clone môi trường.
+  + Mỗi sample chỉ được tạo đúng 1 đối tượng ToolEnv duy nhất. Mọi lệnh gọi phát
+    sinh đều phải nằm trong log nộp bài.
+  + Đảm bảo môi trường chạy hoàn toàn cô lập: Không có kết nối mạng (Internet access = None).
+  + Cố định toàn bộ random seeds (python random, numpy, torch) trong toàn bộ mã nguồn.
+================================================================================

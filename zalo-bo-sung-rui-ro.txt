@@ -1,0 +1,62 @@
+================================================================================
+VI. BỔ SUNG & RỦI RO (ĐỀ XUẤT BỔ SUNG CHO zalo-ý-tưởng-final.txt)
+================================================================================
+
+1. MỌI CALL ĐỀU BỊ GHI LOG VÀ CHẤM ĐIỂM
+   - Mọi call trên ToolEnv (kể cả call lỗi, call read thừa) đều nằm trong
+     submission. Call không khớp gold làm tăng U và giảm precision.
+   - Vòng ReAct KHÔNG được "thử sai" bằng env.call. Dùng env.validate (không
+     thực thi) để kiểm tra argument trước khi gọi thật.
+   - Chỉ gọi các read tool thật sự cần (như gold thường có smart_home.get_status
+     trước khi ghi). Học mẫu gọi read từ gold trajectory của tập train.
+   - Nhóm out-of-scope: không gọi bất kỳ tool nào, kể cả read.
+
+2. AUDIO CỦA HISTORY
+   - Đề nói audio gồm cả các lượt user trước đó trong history. Module ASR cần
+     hỗ trợ transcribe nhiều file (history + câu hiện tại) và đưa transcript
+     của history vào context cho LLM.
+   - Cần kiểm tra lại trên dữ liệu: field history có kèm đường dẫn audio không.
+
+3. THAM SỐ FUZZY & THỜI GIAN
+   - Thời gian tương đối ("ba giờ chiều mai", "tuần sau") phải đổi sang ISO có
+     timezone dựa trên context.current_time. Cần người phụ trách rõ ràng
+     (đề xuất: Quân, kèm bước chuẩn hóa số/giờ của Phú).
+   - Tham số x-match: "fuzzy" chấm bằng token-F1 > 0.6 (lowercase, NFC): chỉ cần
+     đúng phần lớn từ khóa, không cần giống từng chữ.
+   - Với ask_missing_info: tool_name và params phải đúng như gold.
+
+4. FINE-TUNE VÀ KIỂM THỬ
+   - Bản final bỏ kế hoạch fine-tune của bản đầu. Đề xuất giữ lại:
+     * LLM: LoRA/QLoRA trên gold trajectory (text -> tool_calls, gồm cả bước
+       read và ask_missing_info / []) của train.
+     * ASR: dùng audio_text của train để đánh giá WER, fine-tune nhẹ hoặc
+       hotwords theo tools_catalog.
+   - Tách tập validation cố định từ train (ví dụ 15–20%) để đo; không dùng
+     public_test để gán nhãn hay tinh chỉnh.
+
+5. QUY TẮC "KHÔNG HARD CODE" CẦN NÓI RÕ
+   - Cấm: gán cứng theo sample ID, ID thiết bị/người dùng, gán nhãn tập test.
+   - Cho phép: lọc schema theo installed_apps, validate argument, chuẩn hóa NFC,
+     giới hạn số vòng lặp, xử lý lỗi. Đây không phải hard code kết quả.
+
+6. CƠ CHẾ CHỐNG LỖI
+   - Mỗi sample bọc try/except và timeout (< 30s, nên đặt ngưỡng an toàn ~25s).
+   - Khi lỗi hoặc hết giờ vẫn ghi đủ 1 dòng (ví dụ tool_calls đã thực thi + 
+     env.get_state_hash()). Thiếu dòng hoặc crash thì sample bị 0 điểm.
+   - Đo tổng thời gian ASR + các vòng LLM trên A30; theo dõi VRAM khi nạp
+     đồng thời ASR và LLM.
+
+7. LƯU Ý NHỎ
+   - Số mẫu train: tài liệu ghi 1.545 (đo thực), đề ghi ~1.600. Giữ số đo thực.
+   - "Tuyệt đối không dùng single-shot" nên nới thành: ưu tiên vòng lặp có
+     quan sát kết quả read, vì ID phụ thuộc kết quả read.
+
+8. MỐC THỜI GIAN ĐỀ XUẤT (hạn 23:59 ngày 16/11/2026)
+   - 07–09/11: baseline end-to-end, evaluate.py, nộp thử public_test.
+   - 10–12/11: chọn model ASR/LLM, fine-tune, so sánh trên validation.
+   - 13–14/11: tối ưu tốc độ/quantization, xử lý ca đặc biệt (missing, OOS).
+   - 15/11: đóng gói Docker, chạy thử offline (--network none) trên A30 tương
+     đương, kiểm tra timeout và tái lập.
+   - 16/11: chỉ sửa lỗi nghiêm trọng, nộp trước hạn.
+================================================================================
+

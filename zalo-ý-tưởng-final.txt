@@ -1,0 +1,541 @@
+================================================================================
+KẾ HOẠCH HÀNH ĐỘNG, SỐ LIỆU EDA & NGUYÊN TẮC KỸ THUẬT: DỰ ÁN LIFEMATE
+Phiên bản: 2.0 (bổ sung verify + hợp đồng + checklist)
+================================================================================
+Thành viên nhóm:
+- Phú: Phụ trách ASR & Audio Preprocessing (Âm thanh sang Văn bản)
+- Quân: Phụ trách LLM & Reasoning (Agent Logic & Tool Calling)
+- Phúc: Phụ trách Môi trường, Đánh giá Offline, Tối ưu & Docker
+Hạn chót nộp giải pháp & Docker: 23:59 ngày 16/11/2026
+================================================================================
+
+
+================================================================================
+0. VERIFY TRƯỚC KHI CODE (BẮT BUỘC — LÀM TRONG 1–2 NGÀY ĐẦU)
+================================================================================
+Mục tiêu: chốt các sự thật kỹ thuật bằng script, KHÔNG đoán. Mọi con số EDA
+trong mục I chỉ có giá trị sau khi đã verify bằng các bước dưới đây.
+
+0.1. VERIFY TÊN APP & TẦN SUẤT (Phúc)
+   - Đọc <split>_tools_catalog.json → lấy set(app.id).
+   - Đọc train.jsonl → đếm Counter(app_key cho từng mẫu trong context.installed_apps).
+   - In bảng: app_id | số mẫu cài app đó | có trong catalog? (Y/N).
+   - Đối chiếu với bảng EDA mục I.4. Nếu lệch (ví dụ "ride" vs "ride_hailing"),
+     SỬA LẠI bảng EDA theo kết quả script, không giữ số cũ.
+   - Output: reports/app_frequency.csv + ghi chú các app bị đặt tên sai
+     trong bản EDA cũ.
+
+0.2. VERIFY SCHEMA sys.ask_missing_info (Quân)
+   - Trích tool có kind="meta" trong catalog. In toàn bộ JSON Schema.
+   - Lấy 20 mẫu train có gold tool_calls chứa sys.ask_missing_info.
+   - In ra chính xác cấu trúc arguments gold (tên field, kiểu giá trị).
+   - Xác nhận: field là "tool_name" hay "tool"? "params" là list[str] tên tham số
+     hay dict? Có field nào khác (reason, missing_fields...)?
+   - Output: reports/ask_missing_info_schema.md — đây là HỢP ĐỒNG CỨNG cho
+     module LLM. Cấm sinh call ask_missing_info khác format này.
+
+0.3. VERIFY HISTORY AUDIO (Phú)
+   - In 5 mẫu train có history != []. In toàn bộ key của từng turn trong history.
+   - Xác nhận: mỗi turn có field "audio" (đường dẫn file) không? Hay chỉ có
+     "text"? Có turn nào là assistant không, hay toàn user?
+   - Đếm: bao nhiêu % mẫu train có history != []? Bao nhiêu turn trung bình?
+   - Output: reports/history_audio_check.md + cập nhật hợp đồng ASR (mục III.1)
+     thành chữ ký hỗ trợ batch/history.
+
+0.4. VERIFY FUZZY & REF FIELDS (Quân + Phúc)
+   - Parse catalog, với mỗi tool liệt kê từng param kèm nhãn:
+     * "exact"  — kiểu int/float/bool/enum hoặc string không có x-match fuzzy
+     * "fuzzy"  — có x-match: "fuzzy"
+     * "ref"    — có x-ref (phải lấy ID từ read tool)
+     * "one_of" — thuộc nhóm x-one-of
+   - Output: reports/tool_spec_compact.json — bản rút gọn dùng để nhét vào prompt.
+     Đây là artifact mà module LLM (Quân) tiêu thụ, KHÔNG đọc catalog gốc.
+
+0.5. VERIFY DANH SÁCH READ TOOL THEO APP (Phúc + Quân)
+   - Với mỗi app, liệt kê các tool kind="read".
+   - Đếm trong train: các read tool nào thực sự xuất hiện trong gold tool_calls,
+     tần suất bao nhiêu.
+   - Output: reports/read_tool_usage.md — dùng để quyết định "khi nào cần gọi read
+     trước write". Không gọi read thừa (tăng U), không bỏ read khi gold có (giảm R).
+
+0.6. VERIFY STATE_HASH KHI CALL LỖI (Phúc)
+   - Trên 1 sample train bất kỳ: gọi 1 call hợp lệ, rồi 1 call sai schema (qua
+     env.call), rồi env.get_state_hash(). So với hash khi chỉ gọi call hợp lệ.
+   - Xác nhận: call lỗi có làm thay đổi state_hash không? (Kỳ vọng: không, nhưng
+     phải verify vì ảnh hưởng đến chiến lược retry.)
+   - Output: ghi chú vào mục VI.1.
+
+
+================================================================================
+I. TỔNG HỢP SỐ LIỆU THỐNG KÊ THỰC TẾ & GIẢI THÍCH CHI TIẾT VỀ DATASET
+--------------------------------------------------------------------------------
+Lưu ý: Toàn bộ số liệu dưới đây là kết quả khảo sát sơ bộ trên train.jsonl
+(~1.545 mẫu) TRƯỚC khi verify mục 0. Sau khi chạy mục 0, các bảng sẽ được cập
+nhật lại theo reports/app_frequency.csv và các file verify khác.
+
+1. QUY MÔ & CƠ CẤU TẬP DỮ LIỆU
+   - Tổng số mẫu tập Train: ~1.545 mẫu (đề ghi ~1.600, giữ số đo thực).
+   - Định dạng âm thanh: File WAV, 16 kHz, mono, 16-bit, giọng nói 100% người
+     thật đến từ 3 miền (Bắc, Trung, Nam), có xen kẽ từ mượn tiếng Anh thông dụng.
+   - Dữ liệu đi kèm: id, audio path, user context (current_time, timezone,
+     vị trí hiện tại, user_profile), installed_apps, conversation history.
+   - Nhãn (chỉ có ở tập Train): audio_text (transcript chuẩn), tool_calls vàng,
+     tool_results và final_state của ứng dụng sau khi thực thi.
+   - Audio của history: đề nói audio gồm cả các lượt user trước đó trong history.
+     Phải verify mục 0.3 trước khi thiết kế module ASR.
+
+2. PHÂN TÍCH CHI TIẾT 3 NHÓM KỊCH BẢN DỮ LIỆU (số liệu sơ bộ, sẽ verify lại):
+   a) Mẫu thực thi bình thường (Execute actions): ~78.8% (1.217 mẫu)
+      - Bản chất: Câu lệnh rõ ràng, ứng dụng tương ứng đã được cài đặt trong
+        context.installed_apps, và hệ thống có đầy đủ thông tin để hoàn tất tác vụ.
+      - Yêu cầu: Agent phải chuyển trạng thái môi trường về đúng trạng thái đích
+        sao cho state_hash sinh ra khớp hoàn toàn với gold state_hash.
+      - Ví dụ: "Bật điều hòa phòng khách 26 độ" (với app smart_home đã cài sẵn).
+
+   b) Mẫu cần hỏi thêm thông tin (sys.ask_missing_info): ~14.0% (217 mẫu)
+      - Bản chất: Người dùng có ý định gọi một app đã được cài đặt, nhưng câu
+        nói bị thiếu tham số bắt buộc (các trường trong mảng "required" của JSON
+        Schema) mà ngữ cảnh (context, profile) không thể tự suy luận ra được.
+      - Hành vi sai thường gặp: LLM bị "nhiệt tình thái quá" tự bịa thông tin
+        (ví dụ: người dùng nói "chuyển tiền cho Nam", LLM tự điền amount=50.000)
+        -> Dẫn đến sai trạng thái môi trường -> 0 điểm toàn bộ mẫu!
+      - Hành vi đúng: Agent dừng lại và gọi công cụ hệ thống:
+        sys.ask_missing_info(tool_name="...", params=["..."]).
+        (Schema chính xác phải verify mục 0.2 — không đoán.)
+      - Lưu ý: Lệnh này được tính điểm khớp công cụ như bình thường, không làm
+        thay đổi state ngầm của các app.
+
+   c) Mẫu ngoài phạm vi (Out-of-scope): ~7.2% (111 mẫu)
+      - Bản chất: Yêu cầu của người dùng không thể thực hiện được, thuộc 2 trường hợp:
+        (1) Ứng dụng liên quan KHÔNG có trong context.installed_apps của mẫu đó
+            (ví dụ: bảo "đặt xe" nhưng mẫu đó chỉ cài smart_home và weather).
+        (2) Yêu cầu hoàn toàn nằm ngoài danh mục 45 app của cuộc thi
+            (ví dụ: "làm thơ", "kể chuyện cười", hỏi kiến thức chung).
+      - Quy tắc tính điểm sinh tử: Nhãn chuẩn (Gold) của nhóm này là danh sách
+        rỗng: tool_calls = []. Nếu nộp danh sách rỗng, mẫu đó được trọn 1 điểm;
+        nếu cố tình gọi bất kỳ tool nào (dù là read tool), mẫu đó nhận 0 điểm!
+
+   -> KẾT LUẬN VỀ 21.2% MẪU ĐẶC BIỆT:
+      Tổng cộng có hơn 21% số mẫu không phải là thực thi lệnh bình thường. Đây là
+      yếu tố phân hóa thứ hạng lớn nhất. Agent cần có khả năng phân luồng (Routing)
+      chính xác để tránh bị phạt lỗi gọi thừa (U) hoặc sai lệch mã state_hash.
+
+3. PHÂN TÍCH ĐỘ SÂU GỌI CÔNG CỤ (MULTI-STEP DEPTH) & CƠ CHẾ REACT:
+   - Số bước gọi công cụ trung bình: ~2.29 tool calls / mẫu.
+   - Vấn đề phụ thuộc ID (x-ref - Foreign Key):
+     Trong cơ sở dữ liệu ngầm, các đối tượng được quản lý bằng ID định danh kỹ
+     thuật (device_id: "light_living", contact_id: "c_01", playlist_id: "pl_01").
+     Người dùng trong audio chỉ nói tên tự nhiên ("đèn phòng khách", "bạn Nam").
+     Agent KHÔNG THỂ đoán mò các ID này nếu không tra cứu trước.
+   - Luồng tương tác chuẩn (ReAct Multi-turn Loop):
+     * Bước 1 (Read Tool): Gọi công cụ đọc dữ liệu (smart_home.get_status,
+       contacts.search, ride.get_estimate...) để lấy danh sách thực tế.
+     * Bước 2 (Write Tools): Dựa vào ID trả về từ bước 1, Agent tiếp tục gọi
+       1-2 công cụ ghi để thay đổi trạng thái theo yêu cầu người dùng.
+   - Bài học kiến trúc:
+     * Không dùng mô hình Single-shot (bắt LLM sinh ngay mảng tool_calls
+       chỉ sau 1 lần đọc prompt), vì lúc đó chưa có ID thực tế.
+     * Bắt buộc phải có vòng lặp tương tác: LLM -> env.call() -> trả kết quả vào
+       context -> LLM sinh lệnh tiếp theo.
+     * Giới hạn vòng lặp: Vì độ sâu trung bình là 2.29, chỉ cần giới hạn tối đa
+       3-4 vòng lặp (iterations) là đủ xử lý mọi mẫu, tránh nguy cơ chạy lặp vô
+       tận làm vượt quá giới hạn 30 giây/mẫu.
+
+4. HỆ SINH THÁI ỨNG DỤNG & CÁC LƯU Ý KHI TIỀN XỬ LÝ SCHEMA:
+   - Dữ liệu có tổng cộng 45 ứng dụng khác nhau.
+   - Tần suất xuất hiện sơ bộ (sẽ verify lại ở mục 0.1):
+     contacts (887), calendar (871), reminders (871), chat_ott (691),
+     smart_home (659), weather (634), notes (557), ewallet (549), tasks (543),
+     phone (529), ride_hailing (507), alarm (493), banking (489),
+     food_delivery (457), sms (426).
+   - Tần suất trung bình và thấp: email, gold_price, music, tv, medication,
+     fuel_price, maps, bill_payment, news, robot_vacuum, door_lock, flights,...
+   - Lưu ý sống còn về Token Limit:
+     Toàn bộ catalog 45 apps rất dài. Tuyệt đối KHÔNG đưa toàn bộ catalog vào
+     prompt. Phải viết hàm trích xuất động: Chỉ lấy schema của các app có tên
+     trong context.installed_apps của mẫu hiện tại để đưa vào prompt cho LLM.
+     Schema sau khi lọc phải qua bước rút gọn theo reports/tool_spec_compact.json
+     (gắn nhãn exact/fuzzy/ref/one_of cho từng param).
+
+
+================================================================================
+II. GIAI ĐOẠN 1 CẦN LÀM GÌ? (HOÀN THIỆN BASELINE)
+================================================================================
+Mục tiêu duy nhất của Giai đoạn 1 là dựng một Pipeline tối giản chạy thông suốt
+từ đầu đến cuối (End-to-End Baseline) để cả 3 người hiểu luồng dữ liệu trước khi
+đi sâu vào nghiên cứu:
+
+1. Khám phá và chạy thử môi trường (Đã hoàn thành):
+   - Đã giải nén dữ liệu tại /content/dataset/train+public_test.
+   - Đã kiểm chứng luồng ToolEnv: gọi tool read (smart_home.get_status), gọi tool
+     write (light_set, climate_set), kiểm tra env.validate() và xác nhận mã băm
+     state_hash thay đổi tương ứng sau khi thực thi lệnh.
+
+2. Ghép nối Pipeline thô (Naive Baseline):
+   - Dùng 1 mô hình ASR có sẵn (như Whisper-base/small) để chuyển audio sang text.
+   - Dùng 1 LLM nhỏ có sẵn (như Qwen2.5-1.5B/3B) kèm prompt đơn giản (đã lọc
+     installed_apps) để sinh danh sách tool calls.
+   - Chạy các tool calls này vào ToolEnv, lấy danh sách lệnh đã thực thi
+     (env.get_tool_calls()) và mã băm (env.get_state_hash()).
+
+3. Xuất file và nộp thử:
+   - Chạy script trên tập public_test để tạo ra file submission.jsonl đúng format.
+   - Nộp thử 1 lần lên web BTC nhằm kiểm tra hệ sinh thái nộp bài và định dạng file.
+
+4. Dựng bộ tự đánh giá offline (evaluate.py):
+   - Viết script tính điểm theo đúng công thức F1 (Precision P, Recall R) và kiểm
+     tra điều kiện tiên quyết state_hash == gold_hash trên 1.545 mẫu tập train để
+     dùng làm thước đo chuẩn cho toàn bộ quá trình thử nghiệm sau này.
+
+5. Verify mục 0:
+   - Hoàn thành 6 bước verify trong mục 0 trước khi bước sang Giai đoạn 2.
+   - Cập nhật lại các bảng số liệu trong mục I nếu kết quả verify khác.
+
+
+================================================================================
+III. GIAI ĐOẠN 2: QUY CHUẨN GIAO DIỆN HỢP ĐỒNG (INPUT / OUTPUT CONTRACTS)
+================================================================================
+Để 3 thành viên có thể nghiên cứu, thử nghiệm ý tưởng độc lập mà khi ráp nối lại
+KHÔNG BỊ XUNG ĐỘT (conflict), toàn bộ hệ thống phải tuân theo hợp đồng dữ liệu chuẩn:
+
+                      [File .wav + Sample Context]
+                                   │
+                                   ▼
+                   ┌───────────────────────────────┐
+                   │   MODULE ASR (Phú phụ trách)  │
+                   └───────────────┬───────────────┘
+                                   │ Output: text (str, Unicode NFC)
+                                   │        + history_transcripts (list[str])
+                                   ▼
+                   ┌───────────────────────────────┐
+                   │  MODULE LLM AGENT (Quân PT)   │ ◄───┐
+                   └───────────────┬───────────────┘     │
+                                   │ Output: [ToolCall]  │ ToolResult
+                                   ▼                     │
+                   ┌───────────────────────────────┐     │
+                   │  TOOL ENV EXECUTION (Phúc PT) ├─────┘
+                   └───────────────┬───────────────┘
+                                   │ Output: (tool_calls, state_hash)
+                                   ▼
+                       [result/submission.jsonl]
+
+--------------------------------------------------------------------------------
+1. HỢP ĐỒNG MODULE ASR (PHÚ PHỤ TRÁCH)
+--------------------------------------------------------------------------------
+- INPUT:
+  + audio_path (str | Path): file .wav của câu hiện tại.
+  + history (list[dict], mặc định []): các turn trước. Mỗi turn có thể chứa
+    "audio" (đường dẫn) và/hoặc "text" (transcript có sẵn — nếu đề cho).
+  + sample_rate (int = 16000)
+  + metadata (dict | None): hotwords, ngôn ngữ, v.v.
+
+- OUTPUT:
+  + transcript (str): transcript câu hiện tại, đã chuẩn hóa NFC, strip,
+    số/ngày/giờ/tiền tệ chuyển về dạng số có cấu trúc khi có thể
+    ("năm mươi nghìn" → "50000", "ba giờ chiều mai" → giữ nguyên để LLM xử lý
+    theo current_time, KHÔNG tự quy đổi ngày vì ASR không có context).
+  + history_transcripts (list[str]): transcript của từng turn trong history,
+    cùng chuẩn hóa. Turn nào đã có "text" thì dùng luôn (không chạy ASR lại).
+
+- CHỮ KÝ LỚP:
+  class BaseASR:
+      def transcribe(self, audio_path: str, metadata: dict = None) -> str: ...
+      def transcribe_history(self, history: list[dict],
+                             metadata: dict = None) -> list[str]: ...
+      # Mặc định transcribe_history gọi transcribe cho từng turn có "audio",
+      # và copy "text" cho turn đã có sẵn.
+
+- RÀNG BUỘC:
+  * Nếu history rỗng → transcribe_history trả [].
+  * Nếu một turn có cả "audio" và "text" → ưu tiên "text" (đề cho sẵn thì dùng).
+  * Chuẩn hóa NFC áp dụng cho CẢ transcript hiện tại và history.
+
+--------------------------------------------------------------------------------
+2. HỢP ĐỒNG MODULE LLM & REASONING (QUÂN PHỤ TRÁCH)
+--------------------------------------------------------------------------------
+- INPUT:
+  + user_text (str): transcript câu hiện tại.
+  + history_transcripts (list[str]): transcript các turn trước (từ ASR).
+  + user_context (dict): current_time, timezone, location, user_profile,
+    installed_apps (nguyên văn).
+  + available_tools (list[dict]): schema ĐÃ LỌC theo installed_apps VÀ đã rút
+    gọn theo reports/tool_spec_compact.json (gắn nhãn exact/fuzzy/ref/one_of).
+  + env_caller (Callable): hàm gọi env.call(name, args) → kết quả. Chỉ dùng
+    để thực thi read tool trong ReAct loop. CẤM dùng để retry write tool.
+  + validator (Callable): hàm gọi env.validate(name, args) → {"ok": bool, ...}.
+    Dùng TRƯỚC mọi write call. Không ghi log, không tính U.
+
+- OUTPUT:
+  + tool_calls (list[dict]): danh sách lệnh theo thứ tự thực thi. Quy tắc:
+    * Out-of-scope (app không cài HOẶC ngoài 45 app) → trả [].
+    * Thiếu tham số bắt buộc không suy ra được từ context → trả
+      [{"name": "sys.ask_missing_info", "arguments": <theo reports/
+      ask_missing_info_schema.md>}]. Có thể đứng sau các read call đã thực thi.
+    * Mọi write call phải pass validator trước khi đưa vào output. Nếu fail
+      → không đưa call đó vào, xử lý như thiếu info hoặc dừng.
+    * Kiểu dữ liệu arguments khớp JSON Schema (int không phải "26").
+    * Thời gian tương đối quy đổi sang ISO có timezone dựa trên
+      context.current_time + timezone.
+    * Fuzzy field: giữ nguyên văn phong người dùng (không tự bịa địa chỉ).
+
+- CHỮ KÝ LỚP:
+  class BaseLLMAgent:
+      def generate_calls(self,
+                         user_text: str,
+                         history_transcripts: list[str],
+                         user_context: dict,
+                         available_tools: list[dict],
+                         env_caller=None,
+                         validator=None) -> list[dict]: ...
+
+--------------------------------------------------------------------------------
+3. HỢP ĐỒNG HỆ THỐNG, PIPELINE & XUẤT SUBMISSION (PHÚC PHỤ TRÁCH)
+--------------------------------------------------------------------------------
+- INPUT:
+  + split (str): "train", "public_test", hoặc "private_test".
+  + data_dir (Path): Thư mục gốc chứa dữ liệu (/data).
+  + asr_model (BaseASR): Thực thể ASR tuân theo BaseASR.
+  + llm_agent (BaseLLMAgent): Thực thể LLM tuân theo BaseLLMAgent.
+- OUTPUT:
+  + submission_file (Path): File result/submission.jsonl được ghi tuần tự, mỗi dòng là:
+    {
+      "id": str,
+      "tool_calls": list[dict],
+      "state_hash": str
+    }
+  + Báo cáo log đánh giá offline (nếu chạy trên train): Điểm Precision, Recall, F1 và
+    tỷ lệ khớp state_hash.
+  + reports/latency.csv: thời gian ASR / mỗi vòng LLM / env.call từng sample.
+  + reports/failures.jsonl: log các sample lỗi/timeout để phân tích.
+
+
+================================================================================
+IV. YÊU CẦU KIẾN TRÚC ĐÓNG GÓI DOCKER: THIẾT KẾ DẠNG CẮM-RÚT (PLUGGABLE)
+================================================================================
+Để giải quyết bài toán: "Khi Phú hay Quân đổi model (ví dụ từ Whisper sang PhoWhisper,
+hoặc từ Qwen2.5-1.5B sang Qwen2.5-3B), chỉ cần đổi cấu hình model mà GIỮ NGUYÊN
+toàn bộ khung code và Docker mà không làm vỡ hệ thống", Phúc cần thiết kế hệ thống
+theo chuẩn Plug-and-Play (Kiến trúc Cắm-và-Chạy):
+
+1. ÁP DỤNG MẪU THIẾT KẾ ADAPTER & FACTORY PATTERN:
+   - Tạo thư mục src/models/ gồm 2 factory loader:
+     * asr_factory.py: Đọc tên model từ file config -> nạp đúng Adapter tương ứng.
+       Mọi model ASR mới đều kế thừa BaseASR, chỉ cần cài đè hàm transcribe()
+       và transcribe_history().
+     * llm_factory.py: Đọc tên model từ file config -> nạp đúng Adapter tương ứng.
+       Mọi model LLM mới đều kế thừa BaseLLMAgent, chỉ cần cài đè hàm generate_calls().
+
+2. QUẢN LÝ BẰNG FILE CẤU HÌNH DUY NHẤT (config.yaml):
+   Mọi tham số lựa chọn model được điều khiển qua file config, không code cứng:
+   -----------------------------------------------------------------------------
+   system:
+     seed: 42
+     timeout_per_sample: 25        # an toàn dưới 30s của đề
+     max_react_turns: 4
+
+   asr:
+     engine: "whisper"                # Options: "whisper", "phowhisper", "dummy"
+     model_path: "/weights/whisper"   # Đường dẫn weights offline trong Docker
+     language: "vi"
+
+   llm:
+     engine: "qwen_hf"                # Options: "qwen_hf", "vllm", "llama_cpp"
+     model_path: "/weights/qwen_llm"  # Đường dẫn weights offline trong Docker
+     context_window: 8192
+     temperature: 0.0
+   -----------------------------------------------------------------------------
+   -> Khi Phú tìm ra model ASR tốt hơn, chỉ cần copy weights vào thư mục weights và
+      đổi giá trị trong file config.yaml. Code chính và Dockerfile KHÔNG CẦN SỬA.
+   -> Tương tự, khi Quân fine-tune xong một LoRA checkpoint cho LLM, chỉ cần trỏ
+      model_path trong config.yaml về thư mục đó.
+
+3. YÊU CẦU ĐÓNG GÓI DOCKER CHUẨN:
+   - Thư mục trọng số (/weights): Chứa sẵn toàn bộ weights offline của cả ASR và LLM.
+     Khi chạy container với cờ --network none, không có bất kỳ lệnh download nào.
+   - Thư mục dữ liệu mount (/data): Đọc file test từ /data/<split>.
+   - Thư mục kết quả (/result): Xuất file /result/submission.jsonl.
+   - Thư mục báo cáo (/result/reports): latency.csv, failures.jsonl, env_info.txt.
+   - Entrypoint: Chạy 1 lệnh duy nhất: python run_pipeline.py --config config.yaml.
+
+
+================================================================================
+V. CÁC QUY ĐỊNH "BẤT DI BẤT DỊCH" CỦA CUỘC THI (TUYỆT ĐỐI KHÔNG VI PHẠM)
+================================================================================
+Vi phạm bất kỳ quy tắc nào dưới đây sẽ dẫn đến việc bị 0 điểm hoặc hủy kết quả
+(Disqualified) khi BTC rà soát mã nguồn và chạy lại Docker:
+
+1. CẤM ĐỌC TRỰC TIẾP DỮ LIỆU MÔI TRƯỜNG (state.json):
+   - Code của giải pháp/Agent tuyệt đối KHÔNG được đọc, sao chép hoặc phân tích
+     bất kỳ file nào nằm trong thư mục <split>_environment/ (bao gồm state.json).
+   - Mọi dữ liệu ứng dụng chỉ được phép truy xuất thông qua các tool calls hợp lệ
+     của thư viện zaic_tools.
+
+2. CẤM DÙNG CÁC HÀM NỘI BỘ CỦA ZAIC_TOOLS KHI INFERENCE:
+   - Khi chạy suy luận (inference), CHỈ ĐƯỢC PHÉP gọi 4 phương thức:
+     env.validate(), env.call(), env.get_tool_calls(), và env.get_state_hash().
+   - TUYỆT ĐỐI CẤM sử dụng: get_state, states, Executor, Simulator, hoặc nhân
+     bản (clone) đối tượng env để thử sai.
+   - Mỗi sample chỉ được khởi tạo đúng 1 ToolEnv duy nhất, và mọi lệnh gọi trên
+     env đó (kể cả lệnh gọi bị lỗi) đều phải xuất hiện trong file submission.
+
+3. CẤM TUYỆT ĐỐI HARD CODE & GÁN NHÃN TẬP TEST:
+   - Không được hard code kết quả theo sample ID, không viết luật if/else gán
+     cứng tham số hay ID thiết bị.
+   - Nghiêm cấm gán nhãn thủ công (bằng tay) hoặc dùng mô hình/dịch vụ bên ngoài
+     để gán nhãn tập public_test hay private_test nhằm mục đích huấn luyện/tinh chỉnh.
+
+4. RÀNG BUỘC KÍCH THƯỚC MÔ HÌNH & NGUỒN DỮ LIỆU:
+   - Tổng tham số toàn hệ thống (ASR + LLM + các module phụ) < 6 tỷ (6B) tham số.
+   - Riêng LLM < 5 tỷ (5B) tham số và context length tối đa <= 16.384 (16K) tokens.
+   - Chỉ sử dụng các mô hình mã nguồn mở và dữ liệu công khai phát hành trước
+     ngày 26/10/2026 có giấy phép hợp lệ.
+   - Có thể tạo dữ liệu tổng hợp (synthetic data) bằng LLM/TTS trong lúc phát
+     triển, nhưng tuyệt đối KHÔNG được gọi bất kỳ API hay mô hình ngoài nào ở
+     giai đoạn chạy suy luận (inference).
+
+5. RÀNG BUỘC THỜI GIAN, MẠNG VÀ TÍNH TÁI LẬP:
+   - Thời gian xử lý tối đa: 30 giây / sample. Quá 30 giây hoặc lỗi runtime sẽ
+     bị 0 điểm cho sample đó.
+   - Chạy hoàn toàn Offline: Container Docker sẽ bị ngắt toàn bộ kết nối mạng
+     Internet khi chấm thi.
+   - Tính tất định (Reproducibility): Bắt buộc khóa tất cả random seeds và dùng
+     greedy decoding / temperature = 0.
+
+
+================================================================================
+VI. BỔ SUNG & RỦI RO
+================================================================================
+
+VI.1. MỌI CALL ĐỀU BỊ GHI LOG — QUY TẮC CỨNG
+  1. Mọi env.call (kể cả call lỗi, call read thừa) đều vào log → vào submission.
+     Call thừa làm tăng U → giảm precision. Call thiếu làm giảm recall.
+  2. TRƯỚC MỌI WRITE CALL: gọi env.validate(name, args). Chỉ khi ok=true mới
+     đưa call vào danh sách thực thi. validate KHÔNG ghi log, KHÔNG tính U.
+  3. CẤM TUYỆT ĐỐI retry bằng env.call. Nếu một call fail giữa chừng:
+     - Không gọi lại.
+     - Nếu thiếu info → gọi sys.ask_missing_info (nếu chưa gọi).
+     - Nếu không cứu được → dừng, nộp state_hash hiện tại.
+  4. Chỉ gọi read tool khi:
+     (a) gold train cho thấy read tool đó xuất hiện trước write tương ứng, HOẶC
+     (b) write call cần x-ref mà agent chưa có ID.
+     Không gọi read "cho chắc" — đây là nguồn U lớn nhất.
+  5. Out-of-scope: TUYỆT ĐỐI không gọi bất kỳ tool nào, kể cả read.
+  6. State_hash khi call lỗi: theo kết quả verify 0.6. Nếu call lỗi không đổi
+     hash, agent vẫn phải nộp hash sau các call thành công — không được bỏ dòng.
+
+VI.2. AUDIO CỦA HISTORY
+  - Đề nói audio gồm cả các lượt user trước đó trong history. Module ASR phải
+    hỗ trợ transcribe nhiều file (history + câu hiện tại) và đưa transcript của
+    history vào context cho LLM.
+  - Bắt buộc verify mục 0.3 trước khi code module ASR.
+  - Nếu history có turn assistant (không có audio), bỏ qua (không đưa vào
+    history_transcripts).
+
+VI.3. THAM SỐ FUZZY & THỜI GIAN
+  - Thời gian tương đối ("ba giờ chiều mai", "tuần sau") phải đổi sang ISO có
+    timezone dựa trên context.current_time. Người phụ trách: Quân, kèm bước
+    chuẩn hóa số/giờ của Phú.
+  - Tham số x-match: "fuzzy" chấm bằng token-F1 > 0.6 (lowercase, NFC): chỉ cần
+    đúng phần lớn từ khóa, không cần giống từng chữ.
+  - Với ask_missing_info: tool_name và params phải đúng như gold (verify 0.2).
+  - Danh sách field fuzzy/ref/one_of cụ thể lấy từ reports/tool_spec_compact.json.
+
+VI.4. CHIẾN LƯỢC MÔ HÌNH — ƯU TIÊN THEO RỦI RO
+  Thứ tự ưu tiên (làm xong mới sang bước sau):
+  P0. Prompt engineering + ReAct loop + lọc schema động + validate arg.
+      Đây là 80% điểm. Không có bước này thì fine-tune cũng vô nghĩa.
+  P1. Few-shot retrieval từ train: chọn k mẫu tương tự (cùng installed_apps,
+      cùng intent) đưa vào prompt. Đo trên validation.
+  P2. Fine-tune LoRA/QLoRA trên gold trajectory CHỈ KHI P0+P1 đã ổn định và
+      còn ≥3 ngày. Nếu không kịp → bỏ, không đánh cược.
+  ASR: dùng audio_text train để đo WER; nếu WER cao trên từ khóa tool
+      (device name, contact name) → thêm hotwords từ catalog. Fine-tune ASR
+      là P2, không phải P0.
+  Validation: tách cố định 15–20% train, KHÔNG đụng public_test để tune.
+  Synthetic data: chỉ dùng để augment train lúc phát triển, không ở inference.
+
+VI.5. QUY TẮC "KHÔNG HARD CODE" CẦN NÓI RÕ
+  - Cấm: gán cứng theo sample ID, ID thiết bị/người dùng, gán nhãn tập test.
+  - Cho phép: lọc schema theo installed_apps, validate argument, chuẩn hóa NFC,
+    giới hạn số vòng lặp, xử lý lỗi. Đây không phải hard code kết quả.
+
+VI.6. CƠ CHẾ CHỐNG LỖI
+  - Mỗi sample bọc try/except và timeout (< 30s, đặt ngưỡng an toàn 25s).
+  - Khi lỗi hoặc hết giờ vẫn ghi đủ 1 dòng (tool_calls đã thực thi + 
+    env.get_state_hash()). Thiếu dòng hoặc crash thì sample bị 0 điểm.
+  - Đo tổng thời gian ASR + các vòng LLM trên A30; theo dõi VRAM khi nạp
+    đồng thời ASR và LLM.
+  - Ghi log lỗi vào reports/failures.jsonl để phân tích sau.
+
+VI.7. LƯU Ý NHỎ
+  - Số mẫu train: tài liệu ghi 1.545 (đo thực), đề ghi ~1.600. Giữ số đo thực.
+  - "Không dùng single-shot" nên hiểu là: ưu tiên vòng lặp có quan sát kết quả
+    read, vì ID phụ thuộc kết quả read. Không phải cấm tuyệt đối single-shot
+    cho các trường hợp không cần ID (ví dụ out-of-scope, ask_missing_info đơn giản).
+
+VI.8. MỐC THỜI GIAN — HẠN 23:59 NGÀY 16/11/2026
+  07/11 (ngay):   Chạy mục 0 (verify) — Phúc + Quân. Chốt hợp đồng ASR/LLM.
+  08–09/11:       Baseline end-to-end (P0) + evaluate.py + nộp thử public_test.
+                  Kiểm tra format submission.jsonl khớp đề.
+  10–11/11:       Few-shot retrieval (P1) + đo trên validation. Tối ưu read-tool
+                  selection theo reports/read_tool_usage.md.
+  12/11:          Quyết định có làm fine-tune hay không dựa trên kết quả P1.
+                  Nếu làm → bắt đầu LoRA, deadline 14/11 phải xong.
+  13–14/11:       Tối ưu tốc độ (quantization, batch ASR), xử lý ca đặc biệt
+                  (ask_missing_info, out-of-scope), đo latency.
+  15/11:          Đóng gói Docker, chạy offline (--network none) trên A30 tương
+                  đương. Chạy 2 lần trên 50 sample để kiểm tra determinism.
+                  Kiểm tra timeout và tổng VRAM (ASR + LLM cùng nạp).
+  16/11:          Chỉ sửa lỗi nghiêm trọng. Nộp trước 23:59.
+
+VI.9. TIE-BREAKING & REPRODUCIBILITY
+  a) Tie-breaking (đề mục 7):
+     - Hòa điểm → re-score tool_calls bỏ state_hash → vẫn hòa → thời gian
+       xử lý trung bình thấp hơn thắng.
+     - Hệ quả: tối ưu tốc độ KHÔNG chỉ để tránh timeout 30s mà còn để thắng
+       tie-break. Đặt mục tiêu: ASR + LLM + env ≤ 8s/sample trung bình trên A30.
+     - Đo thời gian từng giai đoạn (ASR / mỗi vòng LLM / env.call) và log ra
+       reports/latency.csv.
+
+  b) Reproducibility (đề mục 7):
+     - BTC chạy Docker 5 lần lấy trung bình nếu kết quả khác submission.
+     - Bắt buộc: seed Python/NumPy/PyTorch, temp=0/greedy, không dùng thư viện
+       có randomness ẩn (kiểm tra dropout, sampling, hash order).
+     - Bước kiểm tra bắt buộc ngày 15/11: chạy pipeline 2 lần trên 50 sample
+       train, so sánh từng dòng submission.jsonl. Nếu khác → sửa trước khi nộp.
+     - Log seed + version thư viện vào reports/env_info.txt.
+
+VI.10. XỬ LÝ LỖI & TIMEOUT (CHI TIẾT)
+  - Mỗi sample bọc try/except + timeout cứng 25s (dưới 30s của đề).
+  - Khi lỗi/timeout:
+    * Vẫn ghi đủ 1 dòng submission: tool_calls = env.get_tool_calls() (các call
+      đã thực thi), state_hash = env.get_state_hash().
+    * Không được crash cả pipeline vì 1 sample.
+    * Ghi log lỗi vào reports/failures.jsonl để phân tích sau.
+  - Vòng ReAct: tối đa 4 iteration (khớp mục I.3). Sau 4 vòng mà chưa xong →
+    dừng, nộp những gì đã gọi.
+
+
+================================================================================
+VII. CHECKLIST TRƯỚC KHI NỘP DOCKER (BẮT BUỘC TICK ĐỦ)
+================================================================================
+[ ] Tên app trong code khớp catalog thực tế (verify 0.1).
+[ ] sys.ask_missing_info dùng đúng schema (verify 0.2).
+[ ] History audio được transcribe và đưa vào prompt (verify 0.3).
+[ ] available_tools đã lọc theo installed_apps VÀ rút gọn theo tool_spec_compact.
+[ ] Không đọc state.json / không dùng get_state / states / Executor / Simulator.
+[ ] Mỗi sample đúng 1 ToolEnv, không clone.
+[ ] Chỉ dùng validate/call/get_tool_calls/get_state_hash khi inference.
+[ ] Out-of-scope trả [] — không gọi read.
+[ ] Không retry write bằng env.call.
+[ ] Mỗi sample có try/except + timeout 25s, luôn ghi đủ 1 dòng.
+[ ] Seed cố định, temp=0, chạy 2 lần cho kết quả giống nhau.
+[ ] Tổng tham số <6B, LLM <5B, context ≤16K.
+[ ] Docker chạy --network none, đọc /data, ghi /result/submission.jsonl.
+[ ] Đo latency trung bình ≤8s/sample trên A30.
+[ ] submission.jsonl: UTF-8, mỗi dòng 1 JSON, đủ id/tool_calls/state_hash.
+[ ] Không hard code theo sample ID, không gán nhãn test.
+[ ] Không gọi API/mô hình ngoài lúc inference.
+[ ] reports/env_info.txt có seed + version thư viện.
+[ ] reports/latency.csv có thời gian từng giai đoạn.
+[ ] reports/failures.jsonl có log lỗi (nếu có).

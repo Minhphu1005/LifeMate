@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Data & Large Archives (CUỘC THI / DỮ LIỆU NẶNG)
+train+public_test/
+train+public_test.zip
+*.zip
+*.tar.gz
+*.tar
+*.rar
+*.7z
+*.wav
+*.mp3
+
+# Output & Eval Files
+*.jsonl
+*.log
+reports/latency.csv
+reports/failures.jsonl
+
+# Model Weights & Checkpoints
+weights/
+pho_ft/
+pho_ft_test/
+ckpt/
+*.bin
+*.pt
+*.pth
+*.safetensors
+*.onnx
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
