@@ -1,0 +1,24 @@
+system:
+  seed: 42
+  timeout_per_sample: 25      # an toàn dưới 30s của đề
+  max_react_turns: 4
+  max_env_calls: 12
+  allow_write_in_env_caller: false  # bật true nếu train có chuỗi write -> write phụ thuộc ID
+
+paths:
+  data_dir: /data             # thư mục CHA chứa <split>/ và <split>_environment/
+  split: private_test
+  out: /result/submission.jsonl
+  reports: /result/reports
+
+asr:
+  engine: dummy               # dummy | whisper | phowhisper
+  model_path: /weights/asr
+  language: vi
+
+llm:
+  engine: dummy               # dummy | hf
+  model_path: /weights/llm
+  context_window: 8192
+  temperature: 0.0
+

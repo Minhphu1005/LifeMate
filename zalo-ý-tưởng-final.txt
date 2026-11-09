@@ -205,7 +205,7 @@ KHÔNG BỊ XUNG ĐỘT (conflict), toàn bộ hệ thống phải tuân theo h�
                    │   MODULE ASR (Phú phụ trách)  │
                    └───────────────┬───────────────┘
                                    │ Output: text (str, Unicode NFC)
-                                   │        + history_transcripts (list[str])
+                                   │        + history (list[dict])
                                    ▼
                    ┌───────────────────────────────┐
                    │  MODULE LLM AGENT (Quân PT)   │ ◄───┐
@@ -234,8 +234,8 @@ KHÔNG BỊ XUNG ĐỘT (conflict), toàn bộ hệ thống phải tuân theo h�
     số/ngày/giờ/tiền tệ chuyển về dạng số có cấu trúc khi có thể
     ("năm mươi nghìn" → "50000", "ba giờ chiều mai" → giữ nguyên để LLM xử lý
     theo current_time, KHÔNG tự quy đổi ngày vì ASR không có context).
-  + history_transcripts (list[str]): transcript của từng turn trong history,
-    cùng chuẩn hóa. Turn nào đã có "text" thì dùng luôn (không chạy ASR lại).
+  + history (list[dict]): out["history"] của asr.pipeline.transcribe_sample,
+    cùng chuẩn hóa. Turn user có "text", turn assistant giữ nguyên text/tool_calls/tool_results.
 
 - CHỮ KÝ LỚP:
   class BaseASR:
@@ -255,7 +255,7 @@ KHÔNG BỊ XUNG ĐỘT (conflict), toàn bộ hệ thống phải tuân theo h�
 --------------------------------------------------------------------------------
 - INPUT:
   + user_text (str): transcript câu hiện tại.
-  + history_transcripts (list[str]): transcript các turn trước (từ ASR).
+  + history (list[dict]): out["history"] của ASR; turn user có "text", turn assistant có text/tool_calls/tool_results.
   + user_context (dict): current_time, timezone, location, user_profile,
     installed_apps (nguyên văn).
   + available_tools (list[dict]): schema ĐÃ LỌC theo installed_apps VÀ đã rút
@@ -282,7 +282,7 @@ KHÔNG BỊ XUNG ĐỘT (conflict), toàn bộ hệ thống phải tuân theo h�
   class BaseLLMAgent:
       def generate_calls(self,
                          user_text: str,
-                         history_transcripts: list[str],
+                         history: list[dict],
                          user_context: dict,
                          available_tools: list[dict],
                          env_caller=None,
@@ -429,7 +429,7 @@ VI.2. AUDIO CỦA HISTORY
     history vào context cho LLM.
   - Bắt buộc verify mục 0.3 trước khi code module ASR.
   - Nếu history có turn assistant (không có audio), bỏ qua (không đưa vào
-    history_transcripts).
+    history).
 
 VI.3. THAM SỐ FUZZY & THỜI GIAN
   - Thời gian tương đối ("ba giờ chiều mai", "tuần sau") phải đổi sang ISO có

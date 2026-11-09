@@ -1,0 +1,292 @@
+================================================================================
+CÔNG VIỆC 3: PIPELINE, ĐÁNH GIÁ & DOCKER (PHÚC)
+Làm ĐỘC LẬP với ASR (Phú) và LLM (Quân). Khi 2 phần kia xong chỉ việc đổi
+config.yaml rồi chạy lại. Không sửa code của Phú/Quân.
+================================================================================
+
+--------------------------------------------------------------------------------
+0. NGUYÊN TẮC GHÉP KHÔNG PHỤ THUỘC
+--------------------------------------------------------------------------------
+Phúc chỉ làm việc với 3 giao diện cố định (mục 1, 2, 3). Mỗi giao diện có
+một bản "dummy/mock" để Phúc chạy trọn pipeline ngay hôm nay:
+
+  ASR  : asr.models.asr_factory.build_asr(cfg["asr"])       engine "dummy" (CÓ SẴN)
+  LLM  : llm.models.llm_factory.build_llm(cfg["llm"])       engine "dummy" (Quân phải có;
+         trong lúc chờ, Phúc tự viết stub ở pipeline/stubs.py theo mục 2)
+  ENV  : zaic_tools.ToolEnv                                 (BTC cung cấp, có sẵn trong
+         thư mục <split>/zaic_tools)
+
+Phúc import ASR/LLM qua factory bằng config. Nếu import lỗi (module chưa có)
+-> pipeline fallback sang stub trong pipeline/stubs.py. Khi merge: chỉ đổi
+engine trong config.yaml, KHÔNG sửa code pipeline.
+
+--------------------------------------------------------------------------------
+1. GIAO DIỆN VỚI ASR (Phú)
+--------------------------------------------------------------------------------
+  asr = build_asr(cfg["asr"])
+  a = transcribe_sample(asr, item, split_dir)
+
+  INPUT : item (1 dòng <split>.jsonl; dùng "id","audio","history"),
+          split_dir = <data_dir>/<split>
+  OUTPUT: {"text": str,
+           "history": [{"role":"user","text":str},
+                       {"role":"assistant","text":str,"tool_calls":[...],"tool_results":[...]}]}
+  - Truyền thẳng a["text"], a["history"] cho LLM, không chuyển đổi.
+  - Stub khi chưa có ASR thật: engine "dummy" (text = ""). Để test với chữ thật
+    trên TRAIN, dùng item["audio_text"] (CHỈ dev cục bộ; code chạy thật không
+    được dùng audio_text, vì test không có).
+
+--------------------------------------------------------------------------------
+2. GIAO DIỆN VỚI LLM (Quân)
+--------------------------------------------------------------------------------
+  llm = build_llm(cfg["llm"])
+  calls = llm.generate_calls(user_text, history, user_context,
+                             available_tools, env_caller, validator)
+
+  INPUT (Phúc phải cung cấp đủ 6 tham số):
+    user_text        : a["text"]
+    history          : a["history"]                   (list[dict])
+    user_context     : item["context"]                (nguyên văn)
+    available_tools  : catalog đã lọc theo installed_apps (mục 4)
+    env_caller       : hàm bọc env.call (mục 5.2)     — CHỈ cho read tool
+    validator        : hàm bọc env.validate           — không log, không tính U
+  OUTPUT: list[{"name": str, "arguments": dict}] theo thứ tự thực thi.
+
+  Stub LLM (pipeline/stubs.py), để chạy end-to-end khi Quân chưa xong:
+    class DummyLLM:
+        def generate_calls(self, user_text, history, user_context,
+                           available_tools, env_caller=None, validator=None):
+            return []              # = trả lời "out-of-scope" cho mọi mẫu
+    Stub thứ hai để test đường ghi: trả 1 read call (tool kind=read đầu tiên
+    trong available_tools, arguments {} nếu không có tham số bắt buộc) — dùng
+    kiểm tra env.call/ghi log hoạt động.
+
+--------------------------------------------------------------------------------
+3. GIAO DIỆN VỚI ENV (zaic_tools) — QUY TẮC CỨNG
+--------------------------------------------------------------------------------
+  import sys; sys.path.insert(0, str(data_dir / split))
+  from zaic_tools import ToolEnv
+  env = ToolEnv(split, item["id"], root=data_dir)   # ĐÚNG 1 lần/sample, không clone
+  - root = THƯ MỤC CHỨA các thư mục split (không phải thư mục split).
+  - zaic_tools PHẢI lấy từ <split>/zaic_tools của CHÍNH split đang chạy (BTC replay
+    bằng đúng phiên bản đó). Không pip install/copy sẵn bản của split khác vào
+    Docker; sys.path.insert theo split lúc chạy.
+  - ToolEnv tự nạp <split>_environment/<id>/state.json; code của mình không mở file đó.
+  - Failed call trả {"ok": false, "error": "..."} và VẪN bị ghi log.
+  - ĐÃ CHỐT: env.validate chỉ kiểm tra tĩnh theo JSON Schema (dry-run), KHÔNG ghi log,
+    KHÔNG đổi get_tool_calls() và state. Chỉ env.call mới ghi log. (Vẫn nên chạy 1
+    lần kiểm chứng ở verify 0.6 trên dữ liệu thật: so len(get_tool_calls()) và
+    state_hash trước/sau validate.)
+
+  Inference CHỈ được dùng 4 hàm:
+    env.validate(name, args)  -> {"ok": bool, "error"?: str}   (không ghi log)
+    env.call(name, args)      -> {"ok": bool, ...}             (CÓ ghi log, kể cả lỗi)
+    env.get_tool_calls()      -> list[{"name","arguments"}]    (nguồn của tool_calls nộp)
+    env.get_state_hash()      -> str
+  CẤM: get_state, states, Executor, Simulator, đọc <split>_environment/state.json,
+       clone/tạo lại env cho cùng sample, retry write bằng env.call.
+  Chỉ tool thuộc context.installed_apps (+ sys.ask_missing_info) mới gọi được.
+
+  QUAN TRỌNG — nguồn sự thật của tool_calls nộp:
+    tool_calls = env.get_tool_calls()   (log của env), KHÔNG phải list LLM trả.
+  => Mọi call phải đi qua env.call thì mới được tính. Mọi call lỗi/thừa cũng
+     bị ghi và tính vào U, nên pipeline không được gọi lung tung.
+
+--------------------------------------------------------------------------------
+4. CHUẨN BỊ DỮ LIỆU (Phúc làm, không cần ASR/LLM)
+--------------------------------------------------------------------------------
+4.1 Nạp catalog: <split>_tools_catalog.json (được phép đọc; KHÔNG phải state.json).
+    Cấu trúc THẬT (theo overview.md):
+      {"schema_version","note","apps":[{"id","name_vi","group","description",
+        "tools":[{"name":"<app>.<tool>","kind":"read|write|meta","description",
+                  "parameters":{JSON Schema: type, properties, required},
+                  "returns": str, "app": "<app_id>"}]}]}
+    Annotation trong properties của parameters:
+      "x-ref": "smart_home.devices"  -> GIÁ TRỊ là tên "bộ dữ liệu" trong app data
+              (không phải tên tool). Tham số này phải là ID có thật; lấy ID từ
+              read tool trả bộ dữ liệu đó (vd smart_home.get_status).
+      "x-match": "fuzzy"             -> văn bản tự do, chấm token-F1.
+      "x-one-of"                     -> nằm ở cấp `parameters` (ngang hàng properties/
+              type/required), là list các nhóm: "x-one-of": [["contact_id","phone_number"]]
+              nghĩa là phải có ít nhất một trường trong nhóm. (ĐÃ CHỐT)
+    Nhãn param: exact | fuzzy | ref | one_of.
+    Catalog phủ cả split; từng sample chỉ được gọi tool thuộc installed_apps của nó.
+4.2 Lọc theo installed_apps (LƯU Ý: context.installed_apps là DICT, không phải list):
+      "installed_apps": {"smart_home": {"tools": [...]}, "ride": {"tools": [...]}}
+    - ĐÃ CHỐT: installed_apps[app]["tools"] là list[str] tên tool (vd
+      ["smart_home.get_status","smart_home.light_set"]), KHÔNG có schema, và là
+      TẬP CON các tool của app đó trong catalog.
+    - Cách xử lý: nạp catalog 1 lần vào dict {tool_name: tool}; mỗi sample lọc
+        names = {n for app in installed_apps.values() for n in app["tools"]}
+        available_tools = [catalog[n] for n in names if n in catalog]
+                          + tool sys.ask_missing_info (kind "meta")
+      Giữ thứ tự xuất hiện trong installed_apps để prompt ổn định (tất định).
+      Tên không có trong catalog -> bỏ qua và ghi cảnh báo vào failures.jsonl.
+    - Tên app dùng ĐÚNG như catalog (verify 0.1, vd "ride" hay "ride_hailing").
+    - Gọi tool ngoài danh sách của sample -> env trả lỗi và tính vào U.
+4.3 Rút gọn: reports/tool_spec_compact.json (sinh bởi verify 0.4). Cấu trúc đề xuất:
+      {"name","app","kind","description","returns","params":[{"name","type",
+        "required","label":"exact|fuzzy|ref|one_of","enum"?,"x_ref"?,"group"?}]}
+    Thêm bảng ref_source: x_ref (vd "smart_home.devices") -> read tool trả bộ dữ
+    liệu đó (suy ra từ description/returns + tần suất trong train, verify 0.5).
+    Quân dùng bảng này để biết "ref" thì phải đọc trước bằng read tool nào.
+    Phúc là người sinh và sở hữu file này; Quân chỉ đọc.
+4.4 Ngoài phạm vi: nếu installed_apps rỗng/không có tool nào -> vẫn gọi LLM
+    (LLM tự trả []), không tự quyết định ở pipeline.
+
+--------------------------------------------------------------------------------
+5. VÒNG LẶP CHÍNH CHO 1 SAMPLE (hợp đồng Phúc cài đặt)
+--------------------------------------------------------------------------------
+INPUT run_pipeline.py:
+  --config config.yaml
+  --data-dir /data        (mặc định trong Docker)
+  --split public_test|private_test|train
+  --out /result/submission.jsonl
+  --limit N (dev)
+
+5.1 Thuật toán:
+  với mỗi item trong <data_dir>/<split>/<split>.jsonl (giữ thứ tự, ghi từng dòng
+  và flush ngay):
+    t0 = now
+    env = ToolEnv(split, item["id"], root=data_dir)
+    executed = []                                   # call đã chạy qua env_caller
+    try (timeout cứng 25s toàn sample):
+        a      = transcribe_sample(asr, item, data_dir/split)
+        tools  = filter_tools(catalog, item["context"]["installed_apps"])
+        calls  = llm.generate_calls(a["text"], a["history"], item["context"],
+                                    tools, env_caller, validator)
+        # thực thi phần còn lại (xem 5.3)
+        for c in calls: if not đã_chạy(c): env.call(c["name"], c["arguments"])
+    except Exception / timeout:
+        ghi reports/failures.jsonl (id, loi, stage); KHÔNG crash
+    ghi dòng: {"id": item["id"],
+               "tool_calls": env.get_tool_calls(),
+               "state_hash": env.get_state_hash()}
+  (luôn ghi đủ 1 dòng/sample, kể cả lỗi.)
+
+5.2 env_caller / validator (Phúc cung cấp cho LLM):
+    def validator(name, args): return env.validate(name, args)
+    def env_caller(name, args):
+        if kind(name) == "read":
+            pass
+        elif allow_write_in_env_caller and kind(name) == "write":
+            if name in failed_writes: raise PermissionError("cấm retry write đã fail")
+            if not env.validate(name, args).get("ok"):
+                raise ValueError("write chưa pass validator")
+        else:
+            raise PermissionError("env_caller không cho phép tool này")
+        res = env.call(name, args)
+        if kind(name) == "write" and not res.get("ok", True):
+            failed_writes.add(name)
+        executed.append({"name": name, "arguments": args})
+        return res
+  - Mặc định (allow_write_in_env_caller: false): chỉ cho gọi read ở env_caller;
+    write do pipeline thực thi ở 5.3 sau khi LLM trả list.
+  - Chuỗi write -> write phụ thuộc ID (vd playlist_create -> nhận playlist_id mới ->
+    add_to_playlist): chạy `python -m pipeline.verify_data --data-dir <ROOT>` trên
+    train.jsonl để kiểm tra. Nếu KHÔNG có mẫu nào phụ thuộc write->write thì giữ
+    `allow_write_in_env_caller: false` là an toàn nhất. Nếu CÓ, bật `true` trong
+    config.yaml: cho phép env_caller thực thi cả write sau khi pass validator,
+    nhưng CẤM retry nếu write trả lỗi.
+  - Giới hạn số lần env_caller mỗi sample (mặc định max_react_turns * 3); quá thì
+    trả {"ok": false, "error": "limit"} mà KHÔNG gọi env.
+
+5.3 Quy tắc chống trùng (QUAN TRỌNG, tránh lệch giữa hợp đồng LLM và log env):
+    Hợp đồng LLM yêu cầu output gồm cả read call đã chạy. Để không chạy 2 lần,
+    pipeline dùng MULTISET theo (name, canonical_json(arguments)):
+      còn_lại = calls trừ đi executed (mỗi phần tử executed khử đúng 1 lần)
+      chỉ env.call phần "còn_lại" theo thứ tự.
+    Read call đã chạy ở env_caller không chạy lại. sys.ask_missing_info (kind meta)
+    cũng gọi bằng env.call (để vào log) nếu nằm trong còn_lại.
+    Nếu calls == [] và executed != []: giữ nguyên (log env đã có read).
+    Cảnh báo: read thừa là U; ghi cảnh báo vào failures.jsonl (loại "extra_read").
+
+5.4 Quy tắc phụ:
+  - Out-of-scope mong đợi: tool_calls == [] (env.get_tool_calls() rỗng) -> pipeline
+    không được tự thêm call nào.
+  - Không gọi get_state_hash trước khi xong mọi call (hash là trạng thái cuối).
+  - Thứ tự ghi log là thứ tự env.call thực tế; không sắp xếp lại.
+
+--------------------------------------------------------------------------------
+6. OUTPUT
+--------------------------------------------------------------------------------
+6.1 submission.jsonl: UTF-8, đúng 1 dòng/sample (đủ id, không trùng, không thiếu).
+    Nên giữ thứ tự như <split>.jsonl (ví dụ trong đề không theo thứ tự nên
+    thứ tự không bắt buộc). Có thể đối chiếu với <split>/sample_submission.jsonl
+    (chỉ public_test) để kiểm tra format. ensure_ascii=False:
+      {"id": str, "tool_calls": [{"name","arguments"}], "state_hash": str}
+    Không thêm field khác. Dòng lỗi vẫn có đủ 3 field.
+6.2 reports/latency.csv: id, asr_s, llm_s, env_s, total_s, n_env_calls, n_llm_turns
+6.3 reports/failures.jsonl: {"id","stage":"asr|llm|env|timeout|extra_read","error"}
+6.4 reports/env_info.txt: seed, python/torch/transformers/numpy version, config đã dùng,
+    git commit, ngày chạy.
+6.5 Chạy trên train (đánh giá offline): thêm reports/eval_<split>.json
+    (mục 8).
+
+--------------------------------------------------------------------------------
+7. config.yaml (một file duy nhất)
+--------------------------------------------------------------------------------
+  system:
+    seed: 42
+    timeout_per_sample: 25
+    max_react_turns: 4
+    max_env_calls: 12
+  paths:
+    data_dir: /data
+    out: /result/submission.jsonl
+    reports: /result/reports
+  asr:
+    engine: dummy                    # dummy | whisper | phowhisper
+    model_path: /weights/asr
+    language: vi
+  llm:
+    engine: dummy                    # dummy | hf ...
+    model_path: /weights/llm
+    context_window: 8192
+    temperature: 0.0
+  Đổi engine/model_path là đủ để merge. Phúc không hard code đường dẫn.
+  Fallback stub: nếu import factory lỗi VÀ engine == "dummy" thì dùng pipeline.stubs.
+
+--------------------------------------------------------------------------------
+8. evaluate.py (Phúc tự làm; không phụ thuộc ASR/LLM)
+--------------------------------------------------------------------------------
+INPUT : submission.jsonl + <split>.jsonl (train, có label.tool_calls) [+ gold hash]
+OUTPUT: P, R, F1 trung bình + điểm Final (100/N * tổng Score), tỷ lệ khớp hash,
+        phân loại lỗi (out-of-scope sai, ask_missing_info sai, ...).
+Công thức (đề):
+  Score = 0 nếu hash khác gold hoặc M = 0 (với |G| > 0);
+          F1 = 2PR/(P+R) nếu ngược lại
+  P = M/(M+U), R = M/|G|; U = call nộp không khớp (kể cả call bị lỗi schema).
+  |G| = 0 (out-of-scope): Score = 1 chỉ khi nộp [] (M=0,U=0), ngược lại 0.
+Khớp call: cùng name; mọi tham số non-fuzzy giống hệt; tham số fuzzy có token-F1
+  > 0.6 sau lower + NFC; mỗi call nộp khớp tối đa 1 gold; không xét thứ tự
+  (dùng ghép tham lam/Hungarian trên số khớp).
+Cần verify: (a) train có chứa gold state_hash không? Nếu không có, chấm hash bằng
+  cách replay label.tool_calls qua ToolEnv mới của chính sample đó ở chế độ train
+  (get_state được phép khi train), (b) xác định field fuzzy từ catalog (x-match).
+Test: chạy evaluate.py trên CHÍNH label.tool_calls của train (nộp = gold) ->
+  phải ra 100 điểm. Đây là test không cần ASR/LLM. Ngoài ra thử nộp [] (chỉ đúng
+  mẫu out-of-scope) và thử nộp thiếu call để kiểm tra chiều giảm điểm.
+
+--------------------------------------------------------------------------------
+9. DOCKER
+--------------------------------------------------------------------------------
+  - Base có CUDA tương thích A30; cài requirements = asr/requirements.txt +
+    llm/requirements.txt + pipeline (Phúc gộp, ghim version, kiểm không xung đột).
+  - /weights (copy sẵn weights ASR + LLM), /data (mount, chỉ đọc), /result (ghi).
+  - ENV: HF_HUB_OFFLINE=1, TRANSFORMERS_OFFLINE=1, PYTHONHASHSEED=0.
+  - Entrypoint: python run_pipeline.py --config config.yaml
+    (đọc /data/<split>, ghi /result/submission.jsonl và /result/reports/*).
+  - Chạy thử: docker run --gpus all --network none -v <data>:/data -v <res>:/result IMG
+  - ĐÃ CHỐT: /data là thư mục CHA chứa split (giống ROOT khi chạy Colab):
+        /data/private_test/{private_test.jsonl, private_test_tools_catalog.json,
+                            zaic_tools/, audio/}
+        /data/private_test_environment/
+    => ToolEnv(split, id, root="/data"). Pipeline vẫn chấp nhận layout Colab
+    root/root.name/<split> (như asr/run_split.py) để dev dễ.
+  - zaic_tools lấy từ thư mục split được mount (xem mục 3), không đóng cứng vào image.
+  - Weights/model chỉ là mô hình công khai phát hành TRƯỚC 26/10/2026, license hợp lệ;
+    ghi nguồn + license + số tham số từng model vào reports/env_info.txt.
+  - Model loading nằm ngoài giới hạn 30s/sample? Đề không nói rõ -> nạp model 1 lần
+    khi khởi động, đo thời gian nạp, giữ cho nhỏ.
+

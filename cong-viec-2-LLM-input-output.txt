@@ -1,0 +1,250 @@
+================================================================================
+CÔNG VIỆC 2: MODULE LLM & REASONING (QUÂN) — INPUT / OUTPUT / ĐIỂM KỸ THUẬT
+Mục tiêu: làm độc lập, ghép được ngay với ASR (Phú, đã xong) và pipeline (Phúc)
+mà không phải sửa code của người khác.
+================================================================================
+
+--------------------------------------------------------------------------------
+A. VỊ TRÍ TRONG PIPELINE
+--------------------------------------------------------------------------------
+  audio --[ASR: asr.pipeline.transcribe_sample]--> {text, history}
+        --[Pipeline Phúc: ghép context + lọc tool]--> generate_calls(...)
+        --[LLM Quân]--> tool_calls --[Pipeline Phúc]--> submission.jsonl
+
+Quân KHÔNG đọc audio, KHÔNG đọc state.json, KHÔNG tự ghi submission.
+Quân chỉ cài MỘT lớp: BaseLLMAgent.generate_calls (+ factory).
+
+--------------------------------------------------------------------------------
+B. INPUT (đã chốt, khớp 100% với output ASR hiện có)
+--------------------------------------------------------------------------------
+Chữ ký (đặt trong llm/base.py):
+
+  class BaseLLMAgent:
+      def generate_calls(self,
+                         user_text: str,
+                         history: list[dict],
+                         user_context: dict,
+                         available_tools: list[dict],
+                         env_caller=None,
+                         validator=None) -> list[dict]: ...
+
+1) user_text : str
+   - = out["text"] của asr.pipeline.transcribe_sample. Đã NFC + strip.
+   - Có thể sai nhẹ (tên người, từ ngắn, số). Có thể rỗng nếu ASR lỗi.
+
+2) history : list[dict]   <-- ĐIỂM ĐÃ SỬA SO VỚI BẢN CŨ (trước đây ghi list[str])
+   - = out["history"] của ASR, giữ nguyên thứ tự turn gốc. Mỗi phần tử:
+       {"role": "user", "text": "<transcript ASR>"}
+       {"role": "assistant", "text": "...", "tool_calls": [...], "tool_results": [...]}
+   - Lý do dùng list[dict]: turn assistant mang tool_calls/tool_results trước đó
+     (ID, kết quả read) rất cần cho LLM. Không được làm phẳng thành list[str].
+   - Có thể là [] (mẫu không có history).
+   - Nếu pipeline chỉ muốn truyền chuỗi: tự gọi helper
+       history_to_text(history) -> list[str]   (Quân cung cấp trong llm/utils.py)
+     nhưng chữ ký chuẩn vẫn là list[dict].
+
+3) user_context : dict
+   - Lấy nguyên văn từ item["context"] của dataset. Theo overview.md:
+       current_time (ISO có +07:00), timezone ("Asia/Ho_Chi_Minh"),
+       user_profile (vd {"home_address": "..."}; khoá có thể khác giữa các mẫu),
+       installed_apps (DICT: {app_id: {"tools": ["app.tool", ...]}} — list tên tool,
+       không có schema; schema nằm ở available_tools),
+       và location nếu có.
+   - Quân phải đọc an toàn: dùng .get(), không giả định field nào cũng có
+     (đề liệt kê "location" nhưng ví dụ chỉ thấy user_profile.home_address).
+   - Địa chỉ nhà/cơ quan lấy từ user_profile/location; không bịa địa chỉ.
+
+4) available_tools : list[dict]
+   - Do Phúc lọc theo installed_apps từ catalog, rút gọn theo
+     reports/tool_spec_compact.json. Mỗi param gắn nhãn:
+       exact | fuzzy | ref | one_of
+   - Có cả tool kind = read / write / meta (sys.ask_missing_info).
+   - Quân KHÔNG đọc catalog gốc.
+
+5) env_caller : Callable | None
+   - env_caller(name: str, args: dict) -> kết quả. Bọc env.call của ToolEnv.
+   - Mặc định dùng cho read tool trong ReAct loop.
+   - Xử lý chuỗi write -> write phụ thuộc ID (vd playlist_create -> nhận playlist_id
+     mới -> add_to_playlist):
+     * Cần chạy script verify trên train.jsonl xem có mẫu nào có 2 write phụ thuộc
+       ID của nhau không. Nếu KHÔNG có -> giữ chỉ cho read là an toàn nhất.
+     * Nếu CÓ -> bật allow_write_in_env_caller: true trong config.yaml; khi đó
+       env_caller cho phép thực thi cả write tool SAU KHI đã pass validator, nhưng
+       TUYỆT ĐỐI CẤM retry nếu write trả lỗi (pipeline chặn gọi lại cùng write tool
+       đã fail).
+   - MỌI lần gọi (kể cả lỗi, read thừa) đều bị ghi log và chấm điểm (mục VI.1).
+   - Có thể None khi test offline: khi đó không chạy read, chỉ sinh call.
+
+6) validator : Callable | None
+   - validator(name, args) -> {"ok": bool, "error"?: str}. Bọc env.validate
+     (trả lỗi dạng "thiếu tham số bắt buộc: device_id").
+   - ĐÃ CHỐT: không ghi log, không đổi state, không tính U (dry-run theo schema).
+     Quân được gọi thoải mái trước mọi write call. Chỉ env.call mới được ghi log.
+   - Gọi TRƯỚC mọi write call. Có thể None khi test: bỏ qua bước validate.
+
+--------------------------------------------------------------------------------
+C. OUTPUT
+--------------------------------------------------------------------------------
+  list[dict], mỗi phần tử đúng dạng:
+    {"name": "<app>.<tool>", "arguments": {...}}
+  theo THỨ TỰ THỰC THI.
+
+Quy tắc:
+  - Out-of-scope (app không cài HOẶC ngoài 45 app)  -> trả [].
+  - Thiếu tham số bắt buộc không suy ra được        -> trả
+      [{"name": "sys.ask_missing_info", "arguments": <đúng format trong
+        reports/ask_missing_info_schema.md>}]
+    LƯU Ý TRÁNH READ THỪA: chỉ đứng sau read call khi tham số thiếu là "ref" và
+    phải gọi read mới biết là thiếu/mơ hồ; nếu thiếu tham số non-ref (số tiền,
+    nội dung, thời gian...) thì trả NGAY [sys.ask_missing_info] ở lượt đầu tiên,
+    KHÔNG gọi read trước (xem mục E).
+    Ví dụ: {"tool_name": "music.add_to_playlist", "params": ["playlist_id","track_id"]}
+    (xác nhận lại tên field bằng verify 0.2, không đoán).
+  - Mọi write call phải pass validator trước khi đưa vào output. Fail -> không
+    đưa vào; xử lý như thiếu info hoặc dừng.
+  - Kiểu dữ liệu arguments khớp JSON Schema (int là int, không phải "26").
+  - Thời gian tương đối ("ba giờ chiều mai", "tuần sau") -> ISO 8601 có timezone,
+    tính từ context.current_time + timezone (vd 2026-11-11T05:30:00+07:00).
+  - Fuzzy field: giữ nguyên văn phong người dùng, không tự bịa địa chỉ/tên.
+    (Chấm: tham số fuzzy cần token-F1 > 0.6 sau lower + NFC.)
+  - Tham số NON-fuzzy (kể cả id, enum, số, thời gian) phải GIỐNG HỆT gold. Hệ quả:
+      * Chỉ điền tham số mà người dùng đã nói hoặc suy ra chắc chắn; KHÔNG tự thêm
+        tham số tuỳ chọn "cho đủ" hay giá trị mặc định (dễ lệch gold).
+      * Kiểu dữ liệu và định dạng (ISO time, chữ hoa/thường của enum) phải chuẩn.
+  - Thứ tự call không ảnh hưởng việc khớp, nhưng ảnh hưởng trạng thái cuối
+    (state_hash): giữ đúng thứ tự phụ thuộc (read -> write).
+  - state_hash phải khớp gold, nếu không sample được 0 điểm bất kể tool_calls
+    đúng đến đâu; fuzzy field không ảnh hưởng hash. Vì vậy sai write quan trọng
+    hơn thừa/thiếu một read.
+  - History: state ban đầu ĐÃ bao gồm các hành động trong history (overview: state
+    "with history actions already applied"). Không lặp lại hành động của turn trước
+    trừ khi user yêu cầu lại; dùng history để giải nghĩa đại từ và lấy ID.
+  - Các read call đã thực thi bằng env_caller PHẢI nằm trong output (vì chúng đã
+    vào log của env; thiếu trong output sẽ lệch state_hash/điểm).
+  - Output chỉ gồm tool_calls. state_hash do Phúc lấy từ env.get_state_hash().
+
+--------------------------------------------------------------------------------
+D. CẤU TRÚC FILE ĐỀ XUẤT (không đụng thư mục asr/)
+--------------------------------------------------------------------------------
+  llm/
+    __init__.py
+    base.py            # BaseLLMAgent (chữ ký ở mục B)
+    utils.py           # history_to_text, parse_time_iso, ...
+    prompt.py          # dựng prompt từ user_context + available_tools
+    react_loop.py      # vòng ReAct cho read tool
+    models/
+      __init__.py
+      llm_factory.py   # build_llm(cfg) -> BaseLLMAgent  (giống asr_factory)
+      hf_llm.py        # adapter HF, nạp từ cfg["model_path"]
+                       # llm_factory PHẢI có engine "dummy" luôn trả [] (để Phúc test pipeline khi LLM chưa xong)
+    eval_llm.py        # test offline trên train (không cần Docker)
+    README.md
+
+  Khớp với asr: dùng đúng cách đặt tên/factory/README của asr/ để Phúc ghép
+  bằng config.yaml:
+    llm:
+      engine: hf
+      model_path: /weights/llm
+      max_new_tokens: ...
+  Đổi model chỉ đổi config, không sửa code.
+
+--------------------------------------------------------------------------------
+E. ĐIỂM KỸ THUẬT ĐỂ KHÔNG CONFLICT & GHÉP NỐI TIẾP
+--------------------------------------------------------------------------------
+Ranh giới trách nhiệm:
+  1. Chỉ sửa trong llm/. KHÔNG sửa asr/ (Phú), KHÔNG sửa pipeline/Docker (Phúc).
+  2. Không import ngược: llm/ không import asr/ hay pipeline. Chỉ nhận dữ liệu
+     qua tham số generate_calls.
+  3. Không tự đọc dataset/catalog/state.json trong generate_calls. Mọi thứ cần
+     đều nằm trong 6 tham số.
+  4. Không tự gọi env hay zaic_tools. Chỉ dùng env_caller và validator được truyền.
+     Inference chỉ được phép 4 phương thức của ToolEnv (xem mục V.2 file kế hoạch).
+  5. Không in/ghi file ngoài thư mục tạm của mình khi chạy inference.
+  6. Mọi lỗi phải được bắt trong generate_calls: lỗi/timeout -> trả [] (hoặc kết
+     quả tốt nhất đã có), TUYỆT ĐỐI không raise ra ngoài làm sập cả lượt chạy.
+  7. Dependency mới thêm vào llm/requirements.txt riêng; không đổi
+     asr/requirements.txt. Phúc gộp khi làm Docker.
+  8. Dùng chung transformers/torch với ASR: ghim version không xung đột.
+     Kiểm tra bằng pip install -r asr/requirements.txt -r llm/requirements.txt.
+
+Ràng buộc cuộc thi (bắt buộc):
+  - Toàn hệ thống < 6B tham số; ASR hiện ~0.77B (PhoWhisper-medium) -> LLM < 5B
+    (và tổng ASR+LLM < 6B). Context <= 16K token.
+  - <= 30s/sample cho CẢ ASR + LLM + read call. Đặt ngân sách LLM <= ~15s,
+    timeout cứng 25s toàn sample (do Phúc bọc). Giới hạn số vòng ReAct (vd <= 4)
+    và max_new_tokens.
+  - Chạy offline: weights đọc từ cfg["model_path"], không tải từ internet,
+    không gọi API ngoài.
+  - Tất định: greedy / temperature=0, cố định seed Python/NumPy/PyTorch.
+  - Không hard code theo sample id, ID thiết bị/người dùng, không gán nhãn test.
+  - Dữ liệu tổng hợp bằng LLM ngoài chỉ được dùng lúc phát triển, không lúc inference.
+  - Chỉ dùng weights/data công khai phát hành trước 26/10/2026.
+
+Xử lý transcript ASR nhiễu:
+  - Tên người/địa điểm có thể sai: khớp với kết quả read tool (contact.search...)
+    thay vì tin tuyệt đối vào chữ ASR; ưu tiên khớp gần đúng không dấu.
+  - user_text rỗng hoặc vô nghĩa -> trả [] (hoặc ask_missing_info nếu hợp lý).
+  - Dùng history để giải nghĩa đại từ ("cái đó", "gọi lại"): lấy ID/kết quả từ
+    turn assistant.tool_results thay vì gọi read lại (giảm U).
+
+Chiến lược gọi tool (tối ưu điểm):
+  - KIỂM TRA ĐỦ THAM SỐ BẮT BUỘC (NON-REF) TRƯỚC KHI GỌI READ TOOL:
+    Nếu câu lệnh thiếu một tham số bắt buộc mà tham số đó KHÔNG thể lấy từ read
+    tool (vd: số tiền amount, nội dung tin nhắn message, thời gian báo thức...),
+    Agent phải trả NGAY [sys.ask_missing_info] ở lượt đầu tiên mà KHÔNG chạy bất
+    kỳ read tool nào (vì mọi read đã gọi qua env_caller đều bị ghi vào log; nếu
+    Gold chỉ có [sys.ask_missing_info] thì read đó bị tính là U=1 làm giảm P).
+    Cần thống kê trên ~217 mẫu ask_missing_info của tập train xem Gold có kèm
+    read call trước đó trong trường hợp nào (script verify_data.py).
+  - Chỉ gọi read khi: (1) đã đủ mọi tham số bắt buộc non-ref, VÀ (2) cần lấy ID
+    cho tham số "ref" mà gold thường có read (xem reports/read_tool_usage.md).
+    Không gọi read thừa (tăng U), không bỏ read cần thiết (giảm R).
+  - Thứ tự chuẩn: kiểm tra non-ref -> read -> (validate) -> write. Nếu có chuỗi
+    write -> write phụ thuộc ID mới tạo (khi bật allow_write_in_env_caller):
+    validate -> gọi write 1 qua env_caller để lấy ID mới -> validate -> write 2
+    (không bao giờ retry write đã fail).
+  - Không gọi call sai schema "để thử": mọi call đều vào log.
+  - Chỉ dùng tool thuộc available_tools (đã lọc theo installed_apps). Tên tool
+    ngoài danh sách -> không sinh.
+  - Tham số x-one-of: chỉ điền đúng một nhóm. Tham số exact: đúng kiểu/enum.
+
+Thứ tự ưu tiên làm (theo rủi ro, mục VI.4):
+  1) Khung generate_calls luôn trả list hợp lệ (kể cả [] khi lỗi) + test chạy được.
+  2) Out-of-scope -> [] và ask_missing_info đúng format.
+  3) Ép JSON hợp lệ + kiểu dữ liệu + ISO time.
+  4) ReAct read -> write có validator.
+  5) Fine-tune/few-shot khi các bước trên ổn.
+
+--------------------------------------------------------------------------------
+F. PHỤ THUỘC CHƯA CÓ (cần chốt với Phúc, không chặn Quân bắt đầu)
+--------------------------------------------------------------------------------
+  - reports/tool_spec_compact.json, reports/ask_missing_info_schema.md
+    -> sinh từ verify mục 0.2 và 0.4. Trong lúc chờ, Quân đọc tạm từ
+    <split>_tools_catalog.json trong file test CỤC BỘ của mình (không đưa vào
+    luồng inference).
+  - env_caller / validator: Phúc cung cấp. Quân test bằng mock:
+      env_caller = lambda name, args: {"ok": True, "data": []}
+      validator  = lambda name, args: {"ok": True}
+  - Test ghép nối mẫu (Quân chạy được ngay, không cần Docker):
+      from asr.models.asr_factory import build_asr
+      from asr.pipeline import transcribe_sample
+      from llm.models.llm_factory import build_llm
+      asr = build_asr(cfg["asr"]); llm = build_llm(cfg["llm"])
+      a = transcribe_sample(asr, item, split_dir)
+      calls = llm.generate_calls(a["text"], a["history"], item["context"],
+                                 tools, env_caller, validator)
+    (có thể thay ASR bằng transcript audio_text của train để test riêng LLM.)
+
+--------------------------------------------------------------------------------
+G. CHECKLIST GIAO LẠI CHO PHÚC
+--------------------------------------------------------------------------------
+  [ ] generate_calls đúng chữ ký mục B, history là list[dict].
+  [ ] Không raise; luôn trả list[dict].
+  [ ] Output đúng format {"name","arguments"}, kiểu dữ liệu khớp schema.
+  [ ] ask_missing_info đúng format đã verify.
+  [ ] Mọi write call đã qua validator; read call đã thực thi nằm trong output.
+  [ ] Greedy + seed cố định; chạy offline với model_path.
+  [ ] llm/requirements.txt không xung đột asr/requirements.txt.
+  [ ] Đo thời gian: ASR + LLM <= ~25s/sample trên A30.
+  [ ] llm/README.md ghi cách dùng + cách đổi model qua config.
+
