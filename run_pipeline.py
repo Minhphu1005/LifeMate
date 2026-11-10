@@ -1,6 +1,5 @@
 import argparse
 from pathlib import Path
-
 import yaml
 
 from pipeline.runner import run
@@ -17,7 +16,7 @@ def main():
     with open(a.config, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     p = cfg.setdefault("paths", {})
-    data_dir = Path(a.data_dir or p.get("data_dir", "/data")).expanduser()
+    data_dir = Path(a.data_dir or p.get("data_dir", "/data")).resolve()
     split = a.split or p.get("split", "private_test")
     if not a.split and not (data_dir / split / f"{split}.jsonl").exists():
         for cand in ("public_test", "train"):
@@ -25,7 +24,7 @@ def main():
                 split = cand
                 break
 
-    out = a.out or p.get("out", "/result/submission.jsonl")
+    out = Path(a.out).resolve() if a.out else p.get("out", "/result/submission.jsonl")
     if not a.out and str(out).startswith("/result/") and not Path("/result").exists():
         out = "result/submission.jsonl"
         if str(p.get("reports", "")).startswith("/result/"):
