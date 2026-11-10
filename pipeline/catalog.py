@@ -88,10 +88,21 @@ def fuzzy_params(catalog: Dict[str, dict]) -> Dict[str, set]:
 
 
 def resolve_layout(data_dir, split) -> Path:
-    """Trả root (thư mục CHA chứa <split>/). Hỗ trợ cả layout Colab root/root.name/<split>."""
-    root = Path(data_dir)
+    """Trả root (thư mục CHA chứa <split>/). Hỗ trợ ~, layout Colab root/root.name/<split>,
+    và trường hợp trỏ thẳng vào thư mục <split>."""
+    root = Path(data_dir).expanduser()
+    if not root.exists():
+        raise FileNotFoundError(
+            f"Thư mục data_dir không tồn tại: {root} (kiểm tra lại đường dẫn, vd ~/Downloads vs ~/Download)"
+        )
     if (root / split / f"{split}.jsonl").exists():
         return root
     if (root / root.name / split / f"{split}.jsonl").exists():
         return root / root.name
-    raise FileNotFoundError(f"Không thấy {split}/{split}.jsonl trong {root}")
+    if (root / f"{split}.jsonl").exists():
+        return root.parent
+    avail = [p.name for p in root.iterdir() if p.is_dir() and (p / f"{p.name}.jsonl").exists()]
+    raise FileNotFoundError(
+        f"Không thấy {split}/{split}.jsonl trong {root} (các split hiện có: {avail or 'không thấy'}; "
+        f"thêm --split public_test hoặc --split train)"
+    )
