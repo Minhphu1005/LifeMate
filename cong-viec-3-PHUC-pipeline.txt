@@ -5,6 +5,99 @@ config.yaml rồi chạy lại. Không sửa code của Phú/Quân.
 ================================================================================
 
 --------------------------------------------------------------------------------
+DANH SÁCH CÁC FILE CỦA PHÚC & TÁC DỤNG TỪNG FILE (Các file đã tạo rỗng để Phúc tự code)
+--------------------------------------------------------------------------------
+1) pipeline/catalog.py
+   - Tác dụng: Xử lý toàn bộ phần đọc & lọc schema công cụ (không đụng tới state.json).
+   - Các hàm cần code:
+     + load_catalog(path) -> dict[str, dict]: Đọc <split>_tools_catalog.json một lần
+       duy nhất vào bộ nhớ theo key là tool_name.
+     + filter_tools(catalog, installed_apps) -> (available_tools, missing_names):
+       Duyệt installed_apps[app]["tools"] (list[str] tên tool), lấy schema tương ứng
+       từ catalog + luôn kèm "sys.ask_missing_info". Giữ thứ tự ổn định (tất định).
+     + compact_tool(tool) -> dict: Rút gọn schema và gắn nhãn từng tham số
+       (exact | fuzzy | ref | one_of) để xuất ra reports/tool_spec_compact.json cho Quân.
+     + fuzzy_params(catalog) -> dict[str, set]: Trả tập tên tham số có x-match="fuzzy"
+       của từng tool (dùng cho evaluate.py chấm token-F1).
+     + resolve_layout(data_dir, split) -> Path: Tìm thư mục gốc chứa <split>/.
+       LƯU Ý: Phải gọi Path(data_dir).expanduser() (vì truyền --data-dir="~/..." trong
+       dấu ngoặc kép shell không tự bung dấu ~), và hỗ trợ cả cấu trúc giải nén lồng
+       root/root.name/<split>.
+
+2) pipeline/stubs.py
+   - Tác dụng: Chứa các lớp LLM giả (mock/stub) để Phúc test trọn luồng pipeline và
+     Docker khi Quân chưa code xong LLM.
+   - Các class cần code:
+     + DummyLLM: generate_calls(...) luôn trả [] (coi mọi mẫu là out-of-scope).
+     + ReadProbeLLM: Gọi thử 1 read tool đầu tiên không có tham số bắt buộc qua
+       env_caller rồi trả về call đó (để test cơ chế ghi log của ToolEnv và chống trùng).
+
+3) pipeline/runner.py
+   - Tác dụng: Trái tim của hệ thống — điều phối vòng lặp qua từng sample, nối
+     ASR -> LLM -> ToolEnv, quản lý timeout, chống trùng call, và xuất file.
+   - Các thành phần cần code:
+     + set_seed(seed): Cố định seed cho random, numpy, torch (tất định).
+     + build_components(cfg): Gọi build_asr(cfg["asr"]) và build_llm(cfg["llm"]);
+       nếu llm chưa có thì fallback sang DummyLLM trong pipeline/stubs.py.
+     + remaining_calls(calls, executed): Khử trùng theo multiset (name + canonical JSON
+       arguments) để các lệnh đã chạy qua env_caller không bị chạy lại lần 2 ở cuối.
+     + SampleRun (hoặc hàm bọc env_caller / validator):
+       * validator(name, args) -> gọi env.validate(name, args) (dry-run, không ghi log).
+       * env_caller(name, args) -> mặc định chỉ cho phép tool có kind=="read" (nếu
+         config bật allow_write_in_env_caller=true thì cho phép cả write đã pass
+         validator nhưng chặn cứng retry nếu write trả về ok=False). Ghi nhận vào
+         danh sách executed và giới hạn tổng số lần gọi (max_env_calls).
+     + process_sample(...): Khởi tạo ĐÚNG 1 ToolEnv(split, item["id"], root=root) cho
+       mỗi mẫu; bọc trong luồng/timeout cứng 25s và try/except; gọi transcribe_sample
+       -> filter_tools -> llm.generate_calls -> thực thi các call còn lại -> trả về
+       env.get_tool_calls() và env.get_state_hash().
+     + run(cfg, split, data_dir, out, limit): Thêm <split>/ vào sys.path để nạp đúng
+       zaic_tools của split đó; chạy tuần tự từng dòng của <split>.jsonl; ghi
+       submission.jsonl (flush từng dòng), reports/latency.csv, reports/failures.jsonl,
+       và reports/env_info.txt.
+
+4) pipeline/verify_data.py
+   - Tác dụng: Script chạy kiểm tra dữ liệu trên tập train.jsonl (Mục 0 & 2 rủi ro logic):
+     + Kiểm tra xem có mẫu nào gọi >= 2 lệnh write mà write sau dùng ID sinh ra từ
+       write trước không (để quyết định bật/tắt allow_write_in_env_caller).
+     + Thống kê các mẫu có sys.ask_missing_info xem bao nhiêu mẫu chỉ có duy nhất
+       1 lệnh ask_missing_info, bao nhiêu mẫu có kèm read call phía trước.
+     + Kiểm tra tần suất app (0.1), schema ask_missing_info (0.2), xuất
+       reports/tool_spec_compact.json (0.4) và reports/read_tool_usage.md (0.5).
+
+5) pipeline/requirements.txt
+   - Tác dụng: Khai báo thư viện riêng của phần pipeline (pyyaml, numpy...). Khi đóng
+     Docker sẽ cài gộp với asr/requirements.txt và llm/requirements.txt.
+
+6) run_pipeline.py (ở thư mục gốc)
+   - Tác dụng: Entrypoint duy nhất của toàn hệ thống và Docker
+     (`python run_pipeline.py --config config.yaml`).
+   - Việc cần làm: Parse CLI args (--config, --data-dir, --split, --out, --limit),
+     đọc config.yaml, xử lý đường dẫn (expanduser, nếu không truyền --split mà thư mục
+     data chỉ có public_test/train thì nhắc hoặc tự chọn thay vì mặc định private_test),
+     rồi gọi pipeline.runner.run(...).
+
+7) evaluate.py (ở thư mục gốc)
+   - Tác dụng: Bộ chấm điểm offline độc lập trên tập train theo đúng công thức của BTC.
+   - Việc cần làm:
+     + Tính token-F1 (sau lower + NFC) cho các tham số có x-match="fuzzy" (ngưỡng > 0.6)
+       và so sánh chính xác (exact match) cho các tham số còn lại.
+     + Ghép cặp 1-1 tối đa giữa tool_calls dự đoán và label.tool_calls (không xét thứ tự).
+     + Tính Precision P = M/(M+U), Recall R = M/|G|, F1 = 2PR/(P+R), xét điều kiện
+       out-of-scope (|G|=0) và khớp state_hash.
+     + Có chế độ `--self-test` (lấy chính label.tool_calls làm dự đoán -> phải đạt 100.0 điểm).
+
+8) config.yaml (ở thư mục gốc)
+   - Tác dụng: File cấu hình trung tâm điều khiển toàn bộ hệ thống (seed, timeout,
+     đường dẫn, chọn engine/model_path cho ASR và LLM). Khi Phú/Quân đổi model chỉ cần
+     sửa file này.
+
+9) tests/test_pipeline_mock.py
+   - Tác dụng: Unit test cho pipeline và evaluate bằng dữ liệu + ToolEnv giả lập (mock),
+     giúp Phúc tự kiểm tra toàn bộ logic (chống trùng read, chặn write trong env_caller,
+     xử lý crash/timeout vẫn ghi đủ 1 dòng, chấm điểm F1) mà không cần tải model nặng.
+
+--------------------------------------------------------------------------------
 0. NGUYÊN TẮC GHÉP KHÔNG PHỤ THUỘC
 --------------------------------------------------------------------------------
 Phúc chỉ làm việc với 3 giao diện cố định (mục 1, 2, 3). Mỗi giao diện có
