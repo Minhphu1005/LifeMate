@@ -219,9 +219,11 @@ def run(cfg: dict, split: str, data_dir, out, limit: int = 0):
 
     asr, llm = build_components(cfg)
 
-    out_path = Path(out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    reports_dir = out_path.parent / "reports"
+    out_dir = Path(out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "submission.jsonl"
+
+    reports_dir = out_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     failures_file = reports_dir / "failures.jsonl"
