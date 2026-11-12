@@ -1,0 +1,37 @@
+# Cấu hình thống nhất cho toàn bộ hệ thống LifeMate (ASR + LLM Agent + Runtime)
+# Tổng tham số: PhoWhisper-medium (~0.77B) + Qwen2.5-3B-Instruct (~3.09B) = ~3.86B (< 6B giới hạn đề)
+# LLM < 5B, context_window <= 16384, giải mã hoàn toàn tất định (greedy / temperature = 0).
+
+system:
+  seed: 42
+  time_budget_s: 25          # Ngưỡng an toàn dưới giới hạn 30s/sample của BTC
+  max_steps: 7               # Tối đa số lệnh thực thi trong vòng lặp ReAct
+  max_repairs: 2             # Tối đa số lần sửa lỗi schema / x-ref (không ghi log)
+  few_shot_k: 2              # Số ví dụ mẫu tương đồng nhất (BM25 + installed_apps) chèn vào prompt
+  few_shot_bank: "weights/few_shot_bank.jsonl"
+  enable_xref_guard: true    # Tự động ánh xạ Tên -> ID và chặn đoán mò ID khi chưa gọi read tool
+
+asr:
+  engine: "phowhisper"                         # "phowhisper" | "whisper" | "dummy"
+  model_path: "weights/asr_phowhisper_ft"      # Đường dẫn weights cục bộ (ưu tiên bản đã fine-tune)
+  hub_id: "vinai/PhoWhisper-medium"            # Dùng khi chạy kèm --allow-download lúc phát triển
+  language: "vi"
+  fp16: true
+  batch_size: 8
+  num_beams: 1                                 # Greedy decoding (tất định 100%)
+  max_new_tokens: 128
+  no_repeat_ngram_size: 4                      # Chống lặp từ ảo giác
+  digit_sequences: true
+  trim_silence: true                           # Cắt khoảng lặng đầu/cuối băng giúp tăng tốc & giảm ảo giác
+  skip_chitchat_history: true                  # Bỏ qua ASR cho các lượt history thuần chào hỏi/cảm ơn
+  use_context_prompt: false                    # Có thể bật true để bơm từ khóa profile vào Whisper
+
+llm:
+  engine: "qwen_hf"
+  base_model_path: "weights/qwen2.5_3b"        # Đường dẫn model gốc cục bộ trong Docker
+  hub_id: "Qwen/Qwen2.5-3B-Instruct"           # Dùng khi chạy kèm --allow-download lúc phát triển
+  adapter_path: "weights/llm_lora"             # Thư mục LoRA adapter đã fine-tune (tự bỏ qua nếu chưa train)
+  require_adapter: false                       # Đặt true khi nộp để bắt buộc phải nạp adapter
+  dtype: "bfloat16"
+  max_new_tokens: 200
+  max_context: 12000                           # Dưới giới hạn 16K (16,384) của đề
