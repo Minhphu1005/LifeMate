@@ -135,6 +135,11 @@ def main():
 
     import numpy as np
     import torch
+    try:
+        import peft.import_utils
+        peft.import_utils.is_torchao_available = lambda: False
+    except Exception:
+        pass
     from peft import LoraConfig, get_peft_model
     from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, WhisperForConditionalGeneration, WhisperProcessor
     random.seed(42); np.random.seed(42); torch.manual_seed(42)
@@ -150,6 +155,7 @@ def main():
     model = WhisperForConditionalGeneration.from_pretrained(a.base).to(dev)
     model.generation_config.language, model.generation_config.task = "vi", "transcribe"
     model.generation_config.forced_decoder_ids = None
+    model.generation_config.max_length = None
     model.config.forced_decoder_ids = None
     model.config.use_cache = False
     if val:

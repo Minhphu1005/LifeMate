@@ -73,6 +73,11 @@ def main():
 
     import numpy as np
     import torch
+    try:
+        import peft.import_utils
+        peft.import_utils.is_torchao_available = lambda: False
+    except Exception:
+        pass
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
     from transformers import (AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments)
 
@@ -85,6 +90,9 @@ def main():
         from transformers import BitsAndBytesConfig
         kw["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=dtype)
+        kw["device_map"] = {"": 0} if torch.cuda.is_available() else "auto"
+    else:
+        kw["device_map"] = {"": 0} if torch.cuda.is_available() else None
     model = AutoModelForCausalLM.from_pretrained(a.base, **kw)
     if a.load_4bit:
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
