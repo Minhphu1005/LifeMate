@@ -71,11 +71,21 @@ def run_agent(llm, env, catalog: Catalog, ctx: dict, user_text: str, history: Op
                 continue
         key = json.dumps(call, ensure_ascii=False, sort_keys=True)
         kind = (spec or {}).get("kind", "write")
+        cname = call["name"]
         # Read tool gọi trùng tham số là lặp vô ích; write tool cho phép gọi lặp khi thực sự đổi điểm/voucher (như loyalty.redeem)
         max_dup = 1 if kind == "read" else 3
         if executed_counts.get(key, 0) >= max_dup:
             stop = "duplicate"
             break
+        # Chặn lặp vô ích cho cùng một hàm tìm kiếm/đọc: tối đa 2 lần cho cùng tên tool đọc (tránh spam flights.search 7 lần)
+        same_read_count = sum(1 for s in steps if s.get("call", {}).get("name") == cname and "error" not in s)
+        if kind == "read" and same_read_count >= 2:
+            steps.append({"call": call, "error": f"Tool '{cname}' đã được gọi {same_read_count} lần. Hãy dùng kết quả đã có để gọi tool tiếp theo hoặc trả <end>."})
+            repairs += 1
+            if repairs > max_repairs:
+                stop = "duplicate"
+                break
+            continue
         v = env.validate(call["name"], call["arguments"])
         if not v.get("ok"):
             repairs += 1

@@ -125,6 +125,11 @@ def main():
     model.config.use_cache = False
 
     if not a.full:
+        try:
+            import peft.import_utils
+            peft.import_utils.is_torchao_available = lambda: False
+        except Exception:
+            pass
         from peft import LoraConfig, get_peft_model
         model.enable_input_require_grads()
         model = get_peft_model(model, LoraConfig(

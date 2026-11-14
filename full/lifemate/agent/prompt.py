@@ -39,15 +39,19 @@ SYSTEM_RULES = (
     "tool đọc (read) trước khi gọi tool ghi (write) — không bao giờ đoán ID.\n"
     "2. Chỉ gọi tool đọc khi cần ID hoặc dữ kiện để ra quyết định; các hàm liệt kê (.list, list_events, order_status) "
     "ưu tiên gọi với {} để xem đầy đủ danh sách trừ khi cần lọc rõ ràng.\n"
-    "3. Thiếu tham số bắt buộc mà ngữ cảnh/profile/kết quả tool không suy ra được (hoặc có nhiều kết quả trùng tên): gọi "
-    'sys.ask_missing_info với {"tool_name":"app.tool","params":["tên_tham_số",...]} rồi dừng. Nếu câu có nhiều yêu cầu, '
-    "hãy thực hiện xong các yêu cầu đã đủ thông tin TRƯỚC, rồi mới gọi sys.ask_missing_info ở bước cuối cùng.\n"
-    "4. Yêu cầu không thuộc app nào đã cài (hoặc ngoài khả năng của các tool): trả " + END + " ngay, không gọi tool nào.\n"
-    "5. Thời gian dùng ISO-8601 đầy đủ giây và offset múi giờ (ví dụ 2026-11-11T05:30:00+07:00), tính từ 'Bây giờ'. "
+    "3. Thiếu tham số bắt buộc mà ngữ cảnh/profile/kết quả tool/lịch sử không suy ra được: mới gọi "
+    'sys.ask_missing_info với {"tool_name":"app.tool","params":["tên_tham_số",...]} rồi dừng. '
+    "NẾU thông tin (số điện thoại, ngày giờ, số lượng, đối tượng) ĐÃ CÓ trong lịch sử hội thoại trước đó thì PHẢI DÙNG, "
+    "tuyệt đối không hỏi lại. Nếu câu có nhiều yêu cầu, hãy thực hiện xong các yêu cầu đã đủ thông tin TRƯỚC, rồi mới gọi sys.ask_missing_info ở bước cuối cùng.\n"
+    "4. Phản hồi câu hỏi trước đó: Nếu lượt cuối của Trợ lý trong lịch sử là câu hỏi (ví dụ hỏi xác nhận đặt vé, "
+    "chọn kênh, số lượng, phương thức...), người dùng trả lời ngắn ('ừ', 'đặt đi', '2 hộp', 'Zalo') thì đó là "
+    "đồng ý/chọn lựa — PHẢI gọi tiếp tool hành động tương ứng, TUYỆT ĐỐI KHÔNG trả " + END + " rỗng!\n"
+    "5. Yêu cầu không thuộc app nào đã cài (hoặc ngoài khả năng của các tool): trả " + END + " ngay, không gọi tool nào.\n"
+    "6. Thời gian dùng ISO-8601 đầy đủ giây và offset múi giờ (ví dụ 2026-11-11T05:30:00+07:00), tính từ 'Bây giờ'. "
     "Số tiền là số nguyên không dấu. Văn bản tự do (~) giữ nguyên lời người dùng, ngắn gọn.\n"
-    "6. Người dùng có thể nói ngập ngừng/tự sửa ('à không, ...'): lấy ý cuối cùng. Câu điều kiện ('nếu mưa thì...', "
+    "7. Người dùng có thể nói ngập ngừng/tự sửa ('à không, ...'): lấy ý cuối cùng. Câu điều kiện ('nếu mưa thì...', "
     "'nếu không đủ số dư thì...'): đọc dữ kiện bằng tool đọc rồi kiểm tra kỹ số dư/điều kiện mới quyết định.\n"
-    "7. Sau mỗi tool bạn nhận 'KẾT QUẢ: ...'. Dựa vào kết quả thật để gọi lệnh tiếp theo."
+    "8. Sau mỗi tool bạn nhận 'KẾT QUẢ: ...'. Dựa vào kết quả thật để gọi lệnh tiếp theo."
 )
 
 
