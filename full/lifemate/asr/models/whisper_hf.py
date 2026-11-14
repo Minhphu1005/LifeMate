@@ -58,6 +58,8 @@ class WhisperASR(BaseASR):
         self.processor = WhisperProcessor.from_pretrained(model_path)
         self.model = WhisperForConditionalGeneration.from_pretrained(
             model_path, torch_dtype=dtype).to(self.device).eval()
+        if hasattr(self.model, "generation_config") and self.model.generation_config is not None:
+            self.model.generation_config.max_length = None
         self.dtype = dtype
         self.language = language
         self.batch_size = batch_size
@@ -77,11 +79,13 @@ class WhisperASR(BaseASR):
             return None
 
     def _generate(self, arrays: list, prompt_text: str = "") -> List[str]:
-        feats = self.processor.feature_extractor(
-            arrays, sampling_rate=16000, return_tensors="pt").input_features
-        feats = feats.to(self.device, dtype=self.dtype)
+        inputs = self.processor.feature_extractor(
+            arrays, sampling_rate=16000, return_tensors="pt")
+        feats = inputs.input_features.to(self.device, dtype=self.dtype)
         kwargs = dict(language=self.language, task="transcribe", do_sample=False,
                       num_beams=self.num_beams, max_new_tokens=self.max_new_tokens)
+        if "attention_mask" in inputs and inputs.attention_mask is not None:
+            kwargs["attention_mask"] = inputs.attention_mask.to(self.device)
         if self.no_repeat_ngram_size:
             kwargs["no_repeat_ngram_size"] = self.no_repeat_ngram_size
         pids = self._encode_prompt(prompt_text or self.default_prompt)
