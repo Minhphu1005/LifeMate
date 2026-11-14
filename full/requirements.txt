@@ -9,4 +9,5 @@ soundfile>=0.12.1
 librosa>=0.10.1
 pyyaml>=6.0
 numpy>=1.24.0
+bitsandbytes>=0.43.0
 

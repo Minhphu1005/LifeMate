@@ -1,5 +1,5 @@
 """Vòng lặp ReAct:
-  LLM sinh 1 lệnh -> ép kiểu & sửa x-ref (Tên -> ID) -> kiểm tra x-ref & env.validate (không ghi log)
+  LLM sinh 1 lệnh -> ép kiểu & sửa x-ref (Tên -> ID, nguồn tiền) -> kiểm tra x-ref & env.validate (không ghi log)
   -> env.call -> đưa kết quả thật lại cho LLM.
 
 Quy tắc an toàn (khớp zalo-ý-tưởng-final.txt, mục VI.1):
@@ -41,6 +41,7 @@ def run_agent(llm, env, catalog: Catalog, ctx: dict, user_text: str, history: Op
     executed_counts: dict = {}
     repairs = 0
     stop = "end"
+    is_scripted = isinstance(llm, ScriptedLLM)
     for _ in range(max_steps + max_repairs):
         if deadline is not None and time.time() > deadline:
             stop = "timeout"
@@ -55,9 +56,12 @@ def run_agent(llm, env, catalog: Catalog, ctx: dict, user_text: str, history: Op
             stop = "end"
             break
         spec = catalog.tools.get(call["name"])
-        call["arguments"] = clean_arguments(call["arguments"], spec)
+        call["arguments"] = clean_arguments(call["arguments"], spec, user_text=user_text)
         if enable_xref_guard:
-            xref_err = verify_and_repair_xrefs(call, spec, history, steps)
+            xref_err = verify_and_repair_xrefs(
+                call, spec, history, steps,
+                user_text=user_text, strict_seen_ids=not is_scripted
+            )
             if xref_err:
                 repairs += 1
                 if repairs > max_repairs:
@@ -85,7 +89,19 @@ def run_agent(llm, env, catalog: Catalog, ctx: dict, user_text: str, history: Op
             executed_counts[key] = max_dup
         else:
             executed_counts[key] = executed_counts.get(key, 0) + 1
-        steps.append({"call": call, "result": res})
+        res_for_llm = res
+        if (
+            not is_scripted
+            and call["name"] == "contacts.search"
+            and isinstance(res, dict)
+            and res.get("contacts") == []
+            and " " in str(call["arguments"].get("query") or "").strip()
+        ):
+            res_for_llm = {
+                **res,
+                "_hint": "Không khớp nguyên cụm tên. Hãy thử tìm lại theo tên riêng ngắn gọn hoặc gọi contacts.search({}) để xem toàn bộ danh bạ.",
+            }
+        steps.append({"call": call, "result": res_for_llm})
         if call["name"] == "sys.ask_missing_info":
             stop = "ask_missing_info"
             break

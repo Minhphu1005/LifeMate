@@ -42,6 +42,12 @@ reports/failures.jsonl
 
 # Model Weights & Checkpoints
 weights/
+!full/weights/
+full/weights/*
+!full/weights/.gitkeep
+!full/weights/few_shot_bank.jsonl
+sft_data/
+full/sft_data/
 pho_ft/
 pho_ft_test/
 ckpt/

@@ -38,12 +38,32 @@ _PHONETIC_FIXES = [
     (r"\b(?:ét\s*cộng|s\s*cộng|s\+|s\s*com)\s*sports?\b", "S+ Sport"),
     (r"\bsctv\s*(?:chín|9)\b", "SCTV9"),
     (r"\bti\s+vi\b", "tivi"),
-    # Tài chính / Xăng dầu / Viễn thông / Ứng dụng
+    # Tài chính / Xăng dầu / Viễn thông / Ứng dụng / Chứng khoán / Tàu xe
     (r"\bvàng\s+(?:s\s*c\s*c|sdc|sjc|ét\s*(?:dây|giây|di)\s*xi)\b", "vàng SJC"),
     (r"\b(?:xăng|sang)\s+(?:ron|rôn|roi|giàn|gian)\s*(?:chín\s*(?:mươi\s*)?lăm|chính\s*làm|chỉ\s*đang|chiến\s*lâm|95)\b", "xăng RON95"),
     (r"\b(?:xăng|sang)\s+e\s*(?:năm|5)\b", "xăng E5"),
     (r"\b(?:ét\s*em\s*(?:ét|ế)|s\s*m\s*s)\b", "SMS"),
     (r"\b(?:giao|gia|da)\s+lô\b", "Zalo"),
+    (r"\b(?:vê|vi)\s*(?:en|n)\s*(?:in\s*(?:đếch|đéc|dex)|index)\b", "VNINDEX"),
+    (r"\bvn\s*[-–]?\s*index\b", "VNINDEX"),
+    (r"\b(?:vê|vi)\s*(?:en|n)\s*(?:ba\s*mươi|30)\b", "VN30"),
+    (r"\b(?:dét|dép|zết|giết|z)\s*tê\s*pê\b", "ZTP"),
+    (r"\b(?:dét|dép|zết|giết|z)\s*mờ\s*(?:ích|x)\b", "ZMX"),
+    (r"\b(?:dét|dép|zết|giết|z)\s*đê\s*hát\b", "ZDH"),
+    (r"\b(?:dét|dép|zết|giết|z)\s*đê\s*vê\b", "ZDV"),
+    (r"\b(?:dét|dép|zết|giết|z)\s*(?:ca|k)\s*(?:en|n)\b", "ZKN"),
+    (r"\b(?:dét|dép|zết|giết|z)\s*tê\s*(?:ét|s)\b", "ZTS"),
+    (r"\b(?:dét|dép|zết|giết|z)\s*bê\s*hát\b", "ZBH"),
+    (r"\b(?:dét|dép|zết|giết|z)\s*vê\s*tê\b", "ZVT"),
+    (r"\bvi\s*tếch\b", "Vitech"),
+    (r"\btàu\s+(?:ét\s*e|se)\s*(?:một|1)\b", "tàu SE1"),
+    (r"\btàu\s+(?:ét\s*e|se)\s*(?:hai|2)\b", "tàu SE2"),
+    (r"\btàu\s+(?:ét\s*e|se)\s*(?:ba|3)\b", "tàu SE3"),
+    (r"\btàu\s+(?:ét\s*e|se)\s*(?:bốn|4)\b", "tàu SE4"),
+    (r"\btàu\s+(?:ét\s*e|se)\s*(?:năm|5)\b", "tàu SE5"),
+    (r"\btàu\s+(?:ét\s*e|se)\s*(?:sáu|6)\b", "tàu SE6"),
+    (r"\btàu\s+(?:ét\s*e|se)\s*(?:bảy|bẩy|7)\b", "tàu SE7"),
+    (r"\btàu\s+(?:ét\s*e|se)\s*(?:tám|8)\b", "tàu SE8"),
 ]
 _COMPILED_FIXES = [(re.compile(pat, re.IGNORECASE), rep) for pat, rep in _PHONETIC_FIXES]
 

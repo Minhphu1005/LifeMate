@@ -110,12 +110,13 @@ def main():
         train.rows = train.rows[: a.max_train]
         val.rows = val.rows[: max(4, a.max_train // 8)]
 
+    eval_kw = {"eval_strategy": "epoch"} if "eval_strategy" in TrainingArguments.__init__.__code__.co_varnames else {"evaluation_strategy": "epoch"}
     args = TrainingArguments(
         output_dir=os.path.join(a.out, "ckpt"), per_device_train_batch_size=1, per_device_eval_batch_size=1,
         gradient_accumulation_steps=a.grad_acc, learning_rate=a.lr, num_train_epochs=a.epochs,
-        lr_scheduler_type="cosine", warmup_ratio=0.05, weight_decay=0.0, bf16=bf16, fp16=not bf16,
-        logging_steps=5, eval_strategy="epoch", save_strategy="no", report_to=[], seed=a.seed,
-        remove_unused_columns=False, dataloader_num_workers=0, optim="adamw_torch")
+        lr_scheduler_type="cosine", warmup_steps=10, weight_decay=0.0, bf16=bf16, fp16=not bf16,
+        logging_steps=5, save_strategy="no", report_to=[], seed=a.seed,
+        remove_unused_columns=False, dataloader_num_workers=0, optim="adamw_torch", **eval_kw)
     trainer = Trainer(model=model, args=args, train_dataset=train, eval_dataset=val,
                       data_collator=make_collator(tok.pad_token_id if tok.pad_token_id is not None else 0))
     t0 = time.time()

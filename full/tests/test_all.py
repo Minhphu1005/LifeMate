@@ -35,6 +35,8 @@ def test_asr_normalize():
     assert postprocess("chuyển ti vi sang hát ti vi bảy") == "chuyển tivi sang HTV7"
     assert postprocess("vàng s c c và xăng roi chín lăm, nhắn ét em ế qua giao lô") == \
         "vàng SJC và xăng RON95, nhắn SMS qua Zalo"
+    assert "VNINDEX" in postprocess("xem chỉ số vê en in đếch hôm nay")
+    assert "ZDH" in postprocess("mua cổ phiếu dép đê hát")
     print("[OK] test_asr_normalize")
 
 
@@ -48,11 +50,19 @@ def test_parser_and_cleaner():
                 "device_id": {"type": "string"},
                 "brightness": {"type": "integer"},
                 "color": {"type": "string"},
+                "phone": {"type": "string"},
             }
         }
     }
     cleaned = clean_arguments(c["arguments"], spec)
     assert cleaned == {"device_id": "d1", "brightness": 50}, cleaned
+    # Kiểm tra tự sửa số điện thoại 11 số bị cắt sót 1 số so với câu yêu cầu
+    p_clean = clean_arguments(
+        {"phone": "0950536037"},
+        spec,
+        user_text="Nạp dùm em Linh 50 ngàn cho số 09505360367 nha.",
+    )
+    assert p_clean["phone"] == "09505360367", p_clean
     print("[OK] test_parser_and_cleaner")
 
 

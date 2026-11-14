@@ -14,7 +14,7 @@ def resolve_model(path: str, hub_id: Optional[str] = None, allow_download: bool 
     if path and Path(path).exists():
         return str(path)
     if allow_download and hub_id:
-        return hub_id
+        return hub_id 
     raise FileNotFoundError(
         f"Không thấy model ở '{path}'. Copy weights vào đó (Docker chạy offline) "
         f"hoặc đặt allow_hub_download: true khi phát triển.")

@@ -123,7 +123,9 @@ def run(cfg: dict, data_dir: str, out_path: str, split: Optional[str] = None, li
                 _, tr_dir, _ = locate_split(data_dir, "train")
                 retriever = FewShotRetriever.from_jsonl(tr_dir / "train.jsonl")
             except Exception:
-                retriever = None
+                retriever = FewShotRetriever([])
+        if retriever is not None:
+            retriever.ingest_split_histories(items, asr_cache=cache)
 
     budget = float(sysc.get("time_budget_s", 25))
     rdir = Path(reports_dir) if reports_dir else Path(out_path).parent / "reports"
@@ -169,7 +171,7 @@ def run(cfg: dict, data_dir: str, out_path: str, split: Optional[str] = None, li
                 if retriever is not None and few_shot_k > 0:
                     exs = retriever.retrieve(
                         tr["text"], item["context"].get("installed_apps", {}),
-                        k=few_shot_k, exclude_id=item["id"]
+                        k=few_shot_k, exclude_id=item["id"], catalog=catalog
                     )
                     fs_block = format_few_shot_block(exs)
                 info = run_agent(

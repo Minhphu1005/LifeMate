@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional, Tuple
 
 from .prompt import END
+
+_PHONE_RE = re.compile(r"\b0\d{8,11}\b")
 
 
 def parse_call(text: str) -> Optional[dict]:
@@ -54,21 +57,51 @@ def _coerce(value, spec: dict):
                 return str(value)
         elif t == "array":
             if not isinstance(value, list):
-                return [value] if isinstance(value, (str, int, float)) else value
+                value = [value] if isinstance(value, (str, int, float)) else value
+            item_spec = spec.get("items") or {}
+            if isinstance(value, list) and item_spec.get("type") == "object":
+                ip = item_spec.get("properties") or {}
+                cleaned_list = []
+                for elem in value:
+                    if isinstance(elem, dict):
+                        cleaned_list.append({
+                            ek: (_coerce(ev, ip[ek]) if ek in ip else ev)
+                            for ek, ev in elem.items() if ev is not None
+                        })
+                    else:
+                        cleaned_list.append(elem)
+                return cleaned_list
     except Exception:
         pass
     return value
 
 
-def clean_arguments(args: dict, tool_spec: Optional[dict]) -> dict:
-    """Bỏ giá trị null, bỏ khóa không có trong schema, ép kiểu theo schema. Không bịa giá trị mới."""
+def _str_edit_dist(a: str, b: str) -> int:
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def clean_arguments(args: dict, tool_spec: Optional[dict], user_text: str = "") -> dict:
+    """Bỏ giá trị null, bỏ khóa không có trong schema, ép kiểu theo schema và khớp lại chuỗi SĐT nếu LLM nuốt 1 chữ số."""
     if not tool_spec:
         return args
     props = tool_spec.get("parameters", {}).get("properties", {})
+    text_phones = _PHONE_RE.findall(user_text or "")
     out = {}
     for k, v in args.items():
         if v is None or k not in props:
             continue
-        out[k] = _coerce(v, props[k])
+        cv = _coerce(v, props[k])
+        if k in ("phone", "phone_number") and isinstance(cv, str) and text_phones and cv not in text_phones:
+            # Nếu LLM tự cắt 1 chữ số (ví dụ SĐT 11 số trong ZAIC bị cắt còn 10 số) -> trả về đúng số người dùng nói
+            best = min(text_phones, key=lambda p: _str_edit_dist(cv, p))
+            if _str_edit_dist(cv, best) <= 2:
+                cv = best
+        out[k] = cv
     return out
 

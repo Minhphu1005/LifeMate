@@ -1,4 +1,4 @@
-"""Tạo dữ liệu SFT cho LLM agent từ gold trajectory của train.
+"""Tạo dữ liệu SFT cho LLM agent từ gold trajectory của train + Schema-Guided Augmentation cho toàn bộ Catalog.
 
   python training/build_sft_data.py --data ../train+public_test --out-dir sft_data \
       --asr-train asr_train.jsonl --holdout-apps ""
@@ -6,7 +6,8 @@
 Mỗi sample thành MỘT chuỗi hội thoại nhiều lượt: system(tool+luật) / user(ngữ cảnh+yêu cầu) /
 assistant(lệnh 1) / user(KẾT QUẢ 1) / ... / assistant(<end>). Loss chỉ tính trên các lượt assistant.
 - Biến thể 'noisy': thay transcript chuẩn bằng transcript do ASR sinh (nếu sai ít) để LLM chịu được lỗi nhận dạng.
-- --holdout-apps: đưa các mẫu dùng app đó vào tập val (mô phỏng tool chưa từng thấy, vì public_test có tool mới).
+- Biến thể 'schema_aug' & 'sfr': khai thác history + schema của toàn bộ catalog (bao gồm 11 app mới ở public_test
+  và các app giả lập ngoài tập) để mô hình học quy luật tổng quát đọc hiểu schema, không học vẹt.
 """
 import argparse
 import hashlib
@@ -14,7 +15,6 @@ import json
 import os
 import sys
 import unicodedata
-from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -24,6 +24,7 @@ from lifemate.agent.prompt import END, RESULT_PREFIX, Catalog, call_json, compac
 from lifemate.agent.retriever import FewShotRetriever, format_few_shot_block  # noqa: E402
 from lifemate.data import load_catalog_raw, locate_split, read_jsonl  # noqa: E402
 from lifemate.runner import gold_transcripts  # noqa: E402
+from training.schema_aug import build_public_catalog_trajectories, build_sfr_trajectories  # noqa: E402
 
 
 def norm_words(s):
@@ -116,7 +117,12 @@ def main():
 
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    # Xây dựng kho Few-Shot từ các mẫu thuộc tập train (không đưa mẫu val vào kho để tránh leak khi đo val)
+
+    # 1. Tạo dữ liệu mở rộng từ catalog/history của public_test và SFR
+    pub_sft_rows, pub_fs_records = build_public_catalog_trajectories(a.data, trajectory_messages, seed=a.seed)
+    sfr_rows = build_sfr_trajectories(trajectory_messages)
+
+    # 2. Xây dựng kho Few-Shot từ các mẫu thuộc tập train + mẫu mở rộng catalog
     bank_records = []
     for it in items:
         if not is_val(it):
@@ -124,23 +130,27 @@ def main():
             apps = sorted({c["name"].split(".")[0] for c in calls if "." in c.get("name", "")})
             bank_records.append({
                 "id": it["id"],
+                "source_id": it["id"],
                 "text": it.get("audio_text", ""),
                 "apps": apps,
                 "calls": calls,
             })
+    bank_records.extend(pub_fs_records)
     retriever = FewShotRetriever(bank_records)
     if a.few_shot_bank:
         retriever.save_compact(Path(a.few_shot_bank))
-        print(f"[few-shot] đã lưu {len(bank_records)} mẫu vào {a.few_shot_bank}")
+        print(f"[few-shot] đã lưu {len(retriever.records)} mẫu (gồm cả 11 app mới) vào {a.few_shot_bank}")
 
     ftr, fva = open(out / "sft_train.jsonl", "w", encoding="utf-8"), open(out / "sft_val.jsonl", "w", encoding="utf-8")
-    ntr = nva = nnoisy = 0
+    ntr = nva = nnoisy = naug = 0
     val_ids = []
     for it in items:
         lab = it["label"]
         g = gold_transcripts(it)
         inst = it["context"].get("installed_apps", {})
-        fs_gold = format_few_shot_block(retriever.retrieve(g["text"], inst, k=a.few_shot_k, exclude_id=it["id"])) if a.few_shot_k > 0 else ""
+        fs_gold = format_few_shot_block(
+            retriever.retrieve(g["text"], inst, k=a.few_shot_k, exclude_id=it["id"], catalog=catalog)
+        ) if a.few_shot_k > 0 else ""
         msgs = trajectory_messages(catalog, it["context"], g["text"], g["history"], lab["tool_calls"], lab["tool_results"], few_shot_block=fs_gold)
         if is_val(it):
             fva.write(json.dumps({"id": it["id"], "variant": "gold", "messages": msgs}, ensure_ascii=False) + "\n")
@@ -152,13 +162,35 @@ def main():
         if it["id"] in cache:
             nz = noisy_transcripts(it, cache[it["id"]], a.noisy_max_wer)
             if nz and nz["text"] != g["text"]:
-                fs_nz = format_few_shot_block(retriever.retrieve(nz["text"], inst, k=a.few_shot_k, exclude_id=it["id"])) if a.few_shot_k > 0 else ""
+                fs_nz = format_few_shot_block(
+                    retriever.retrieve(nz["text"], inst, k=a.few_shot_k, exclude_id=it["id"], catalog=catalog)
+                ) if a.few_shot_k > 0 else ""
                 m2 = trajectory_messages(catalog, it["context"], nz["text"], nz["history"], lab["tool_calls"], lab["tool_results"], few_shot_block=fs_nz)
                 ftr.write(json.dumps({"id": it["id"], "variant": "noisy", "messages": m2}, ensure_ascii=False) + "\n")
-                ntr += 1; nnoisy += 1
-    ftr.close(); fva.close()
+                ntr += 1
+                nnoisy += 1
+
+    # Ghi các mẫu mở rộng 11 app mới (90% vào train, 10% vào val để theo dõi val_loss trên cả app mới)
+    for idx, r in enumerate(pub_sft_rows):
+        if idx % 10 == 0:
+            fva.write(json.dumps(r, ensure_ascii=False) + "\n")
+            nva += 1
+        else:
+            ftr.write(json.dumps(r, ensure_ascii=False) + "\n")
+            ntr += 1
+            naug += 1
+
+    # Ghi các mẫu SFR (nhân bản x5 để tạo trọng số điều chuẩn chống học vẹt schema)
+    for _ in range(5):
+        for r in sfr_rows:
+            ftr.write(json.dumps(r, ensure_ascii=False) + "\n")
+            ntr += 1
+            naug += 1
+
+    ftr.close()
+    fva.close()
     json.dump(val_ids, open(out / "val_ids.json", "w"))
-    print(f"train seq={ntr} (noisy={nnoisy}) | val seq={nva}")
+    print(f"train seq={ntr} (noisy={nnoisy}, schema_aug+sfr={naug}) | val seq={nva}")
 
     tok = load_tok(a.tokenizer)
     lens = []
@@ -174,4 +206,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
