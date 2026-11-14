@@ -20,6 +20,25 @@ from .prompt import Catalog, build_messages
 from .xref import verify_and_repair_xrefs
 
 
+_READ_CAP_STRICT_TOOLS = ("flights.search", "train_bus_tickets.search", "public_transit.find_routes")
+
+_EMPTY_SEARCH_KEYS = {
+    "contacts.search": "contacts",
+    "event_tickets.search": "events",
+    "grocery.search": "products",
+    "recipes.search": "recipes",
+    "ecommerce.search": "products",
+    "maps.search_place": "places",
+    "library.search": "books",
+    "food_delivery.search_restaurants": "restaurants",
+    "medicine.search": "medicines",
+    "music.search": "tracks",
+    "notes.search": "notes",
+    "vod.search": "items",
+    "workouts.search": "workouts",
+}
+
+
 class ScriptedLLM:
     """LLM giả cho test: phát lại một danh sách lệnh cố định rồi báo <end>. Chỉ dùng để kiểm thử harness."""
 
@@ -60,7 +79,7 @@ def run_agent(llm, env, catalog: Catalog, ctx: dict, user_text: str, history: Op
         if enable_xref_guard:
             xref_err = verify_and_repair_xrefs(
                 call, spec, history, steps,
-                user_text=user_text, strict_seen_ids=not is_scripted
+                user_text=user_text, ctx=ctx, strict_seen_ids=not is_scripted
             )
             if xref_err:
                 repairs += 1
@@ -77,9 +96,10 @@ def run_agent(llm, env, catalog: Catalog, ctx: dict, user_text: str, history: Op
         if executed_counts.get(key, 0) >= max_dup:
             stop = "duplicate"
             break
-        # Chặn lặp vô ích cho cùng một hàm tìm kiếm/đọc: tối đa 2 lần cho cùng tên tool đọc (tránh spam flights.search 7 lần)
+        # Giới hạn số lần lặp cùng một hàm đọc: chặt (2) cho tìm chuyến đi, nới (7) cho truy vấn theo chuỗi ngày/nguyên liệu
+        max_same_read = 2 if cname in _READ_CAP_STRICT_TOOLS else 7
         same_read_count = sum(1 for s in steps if s.get("call", {}).get("name") == cname and "error" not in s)
-        if kind == "read" and same_read_count >= 2:
+        if kind == "read" and same_read_count >= max_same_read:
             steps.append({"call": call, "error": f"Tool '{cname}' đã được gọi {same_read_count} lần. Hãy dùng kết quả đã có để gọi tool tiếp theo hoặc trả <end>."})
             repairs += 1
             if repairs > max_repairs:
@@ -100,16 +120,17 @@ def run_agent(llm, env, catalog: Catalog, ctx: dict, user_text: str, history: Op
         else:
             executed_counts[key] = executed_counts.get(key, 0) + 1
         res_for_llm = res
+        empty_key = _EMPTY_SEARCH_KEYS.get(cname)
         if (
             not is_scripted
-            and call["name"] == "contacts.search"
+            and empty_key is not None
             and isinstance(res, dict)
-            and res.get("contacts") == []
-            and " " in str(call["arguments"].get("query") or "").strip()
+            and res.get(empty_key) == []
+            and str((call.get("arguments") or {}).get("query") or "").strip() != ""
         ):
             res_for_llm = {
                 **res,
-                "_hint": "Không khớp nguyên cụm tên. Hãy thử tìm lại theo tên riêng ngắn gọn hoặc gọi contacts.search({}) để xem toàn bộ danh bạ.",
+                "_hint": "Tìm với từ khóa vừa rồi trả về danh sách rỗng (có thể do lỗi nghe ASR hoặc từ khóa quá chi tiết). Hãy gọi lại hàm tìm kiếm với query=\"\" (chuỗi rỗng) để xem toàn bộ danh sách rồi chọn mục phù hợp nhất!",
             }
         steps.append({"call": call, "result": res_for_llm})
         if call["name"] == "sys.ask_missing_info":

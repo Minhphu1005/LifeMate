@@ -24,7 +24,11 @@ from lifemate.agent.prompt import END, RESULT_PREFIX, Catalog, call_json, compac
 from lifemate.agent.retriever import FewShotRetriever, format_few_shot_block  # noqa: E402
 from lifemate.data import load_catalog_raw, locate_split, read_jsonl  # noqa: E402
 from lifemate.runner import gold_transcripts  # noqa: E402
-from training.schema_aug import build_public_catalog_trajectories, build_sfr_trajectories  # noqa: E402
+from training.schema_aug import (  # noqa: E402
+    build_public_catalog_trajectories,
+    build_sfr_trajectories,
+    build_train_history_trajectories,
+)
 
 
 def norm_words(s):
@@ -95,6 +99,7 @@ def main():
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--holdout-apps", default="", help="app cách nhau dấu phẩy; mẫu dùng app này -> val")
     ap.add_argument("--asr-train", default=None, help="jsonl transcript ASR của train (run_split)")
+    ap.add_argument("--asr-public", default=None, help="jsonl transcript ASR của public_test để lấy history thật của 11 app mới")
     ap.add_argument("--noisy-max-wer", type=float, default=0.35)
     ap.add_argument("--few-shot-k", type=int, default=2)
     ap.add_argument("--few-shot-bank", default="weights/few_shot_bank.jsonl")
@@ -118,8 +123,23 @@ def main():
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # 1. Tạo dữ liệu mở rộng từ catalog/history của public_test và SFR
-    pub_sft_rows, pub_fs_records = build_public_catalog_trajectories(a.data, trajectory_messages, seed=a.seed)
+    # Tự dò asr_public_test.jsonl nếu người dùng chưa truyền --asr-public nhưng đã chạy cache trước đó
+    asr_pub_path = a.asr_public
+    if not asr_pub_path:
+        for cand in (out / "asr_public_test.jsonl", Path("sft_data") / "asr_public_test.jsonl"):
+            if cand.is_file():
+                asr_pub_path = str(cand)
+                break
+    if asr_pub_path:
+        print(f"[asr-public] sử dụng transcript ASR thật của public_test history: {asr_pub_path}")
+
+    # 1. Tạo dữ liệu mở rộng từ catalog/history của public_test, history của train và SFR
+    pub_sft_rows, pub_fs_records = build_public_catalog_trajectories(
+        a.data, trajectory_messages, asr_public_path=asr_pub_path, seed=a.seed
+    )
+    tr_hist_rows = build_train_history_trajectories(
+        items, is_val, catalog, trajectory_messages, gold_transcripts, max_samples=400, seed=a.seed
+    )
     sfr_rows = build_sfr_trajectories(trajectory_messages)
 
     # 2. Xây dựng kho Few-Shot từ các mẫu thuộc tập train + mẫu mở rộng catalog
@@ -142,7 +162,7 @@ def main():
         print(f"[few-shot] đã lưu {len(retriever.records)} mẫu (gồm cả 11 app mới) vào {a.few_shot_bank}")
 
     ftr, fva = open(out / "sft_train.jsonl", "w", encoding="utf-8"), open(out / "sft_val.jsonl", "w", encoding="utf-8")
-    ntr = nva = nnoisy = naug = 0
+    ntr = nva = nnoisy = naug = nthist = 0
     val_ids = []
     for it in items:
         lab = it["label"]
@@ -170,6 +190,12 @@ def main():
                 ntr += 1
                 nnoisy += 1
 
+    # Ghi các mẫu hội thoại nhiều bước khai thác từ history của train
+    for r in tr_hist_rows:
+        ftr.write(json.dumps(r, ensure_ascii=False) + "\n")
+        ntr += 1
+        nthist += 1
+
     # Ghi các mẫu mở rộng 11 app mới (90% vào train, 10% vào val để theo dõi val_loss trên cả app mới)
     for idx, r in enumerate(pub_sft_rows):
         if idx % 10 == 0:
@@ -190,18 +216,14 @@ def main():
     ftr.close()
     fva.close()
     json.dump(val_ids, open(out / "val_ids.json", "w"))
-    print(f"train seq={ntr} (noisy={nnoisy}, schema_aug+sfr={naug}) | val seq={nva}")
+    print(f"train seq={ntr} (noisy={nnoisy}, train_history={nthist}, schema_aug+sfr={naug}) | val seq={nva}")
 
     tok = load_tok(a.tokenizer)
-    lens = []
-    with open(out / "sft_train.jsonl", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if i >= 400:
-                break
-            ids, _ = encode_messages(tok, json.loads(line)["messages"])
-            lens.append(len(ids))
+    all_lines = [l for l in open(out / "sft_train.jsonl", encoding="utf-8") if l.strip()]
+    step = max(1, len(all_lines) // 600)
+    lens = [len(encode_messages(tok, json.loads(l)["messages"])[0]) for l in all_lines[::step]]
     lens.sort()
-    print(f"độ dài token (400 mẫu đầu): TB={sum(lens) / len(lens):.0f} p95={lens[int(.95 * len(lens))]} max={lens[-1]}")
+    print(f"độ dài token ({len(lens)} mẫu đại diện): TB={sum(lens) / len(lens):.0f} p95={lens[int(.95 * len(lens))]} max={lens[-1]}")
 
 
 if __name__ == "__main__":

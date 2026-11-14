@@ -27,6 +27,8 @@ def main():
     ap.add_argument("--model", default=None, help="Ghi đè asr.model_path trong config.yaml")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--skip-chitchat-history", action="store_true",
+                    help="Bỏ qua lượt user history xã giao (mặc định: phiên âm toàn bộ các lượt history)")
     ap.add_argument("--allow-download", action="store_true")
     a = ap.parse_args()
 
@@ -52,7 +54,7 @@ def main():
                 continue
             t0 = time.time()
             try:
-                tr = transcribe_sample(asr, item, sdir)
+                tr = transcribe_sample(asr, item, sdir, skip_chitchat_history=a.skip_chitchat_history)
             except Exception as e:
                 tr = {"text": "", "history": [], "error": repr(e)}
             sec = time.time() - t0

@@ -64,6 +64,18 @@ _PHONETIC_FIXES = [
     (r"\btàu\s+(?:ét\s*e|se)\s*(?:sáu|6)\b", "tàu SE6"),
     (r"\btàu\s+(?:ét\s*e|se)\s*(?:bảy|bẩy|7)\b", "tàu SE7"),
     (r"\btàu\s+(?:ét\s*e|se)\s*(?:tám|8)\b", "tàu SE8"),
+    (r"\b(?:thép|khép)\s+(?:đại|lại)\s+(?:hưng|hương)\b", "Thép Đại Hưng"),
+    (r"\bjack\s*kanner\b", "ZKN"),
+    (r"\bzalo\s*nhỏ\b", "ZKN"),
+    (r"\bcompact\s+ca\s+(?:hát|hai|2)\b", "Compact K2"),
+    (r"\btàu\s+s\s*&?\s*p\s*(?:ba|3)\b", "tàu SE3"),
+    (r"\bsân\s+bay\s+nửa\s+(?:bài|bãi)\b", "sân bay Nội Bài"),
+    (r"\bchuyến\s+r\s*v\s*(\d+)\b", r"chuyến VJ\1"),
+    (r"\bliên\s+hoan\s+(?:xin|sim)\s+nhắn\b", "Liên hoan phim ngắn"),
+    (r"\b(?:sắp|súp)\s+bí\s+đỏ\b", "súp bí đỏ"),
+    (r"\bmình\s+xào\s+chay\b", "mì xào chay"),
+    (r"\bin\s+mặt\b", "yến mạch"),
+    (r"\bben\s+kích\b", "pancake"),
 ]
 _COMPILED_FIXES = [(re.compile(pat, re.IGNORECASE), rep) for pat, rep in _PHONETIC_FIXES]
 
