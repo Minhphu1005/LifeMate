@@ -80,12 +80,13 @@ class WhisperASR(BaseASR):
 
     def _generate(self, arrays: list, prompt_text: str = "") -> List[str]:
         inputs = self.processor.feature_extractor(
-            arrays, sampling_rate=16000, return_tensors="pt")
+            arrays, sampling_rate=16000, return_tensors="pt", return_attention_mask=True)
         feats = inputs.input_features.to(self.device, dtype=self.dtype)
+        attn_mask = inputs.attention_mask.to(self.device) if hasattr(inputs, "attention_mask") and inputs.attention_mask is not None else None
         kwargs = dict(language=self.language, task="transcribe", do_sample=False,
                       num_beams=self.num_beams, max_new_tokens=self.max_new_tokens)
-        if "attention_mask" in inputs and inputs.attention_mask is not None:
-            kwargs["attention_mask"] = inputs.attention_mask.to(self.device)
+        if attn_mask is not None:
+            kwargs["attention_mask"] = attn_mask
         if self.no_repeat_ngram_size:
             kwargs["no_repeat_ngram_size"] = self.no_repeat_ngram_size
         pids = self._encode_prompt(prompt_text or self.default_prompt)
